@@ -1,0 +1,36 @@
+# ============================================================
+# Subfinder Provider Configuration
+# Place this at: ~/.config/subfinder/provider-config.yaml
+#
+# More API keys = more sources = more subdomains found.
+# All free-tier accounts are enough to significantly improve
+# Subfinder's coverage.
+# ============================================================
+
+# Shodan (Member API — you already have this)
+shodan:
+  - YOUR_SHODAN_API_KEY
+
+# GitHub — increases GitHub dorking coverage (free)
+github:
+  - YOUR_GITHUB_PERSONAL_ACCESS_TOKEN
+
+# VirusTotal — huge passive DNS dataset (free tier: 500 req/day)
+virustotal:
+  - YOUR_VIRUSTOTAL_API_KEY
+
+# Censys — excellent for finding internet-exposed assets (free tier available)
+censys:
+  - YOUR_CENSYS_API_ID:YOUR_CENSYS_SECRET
+
+# SecurityTrails — great historical subdomain data (free tier: 50 req/month)
+# securitytrails:
+#   - YOUR_ST_API_KEY
+
+# Chaos (ProjectDiscovery) — pre-enumerated subdomains for major programs
+# chaos:
+#   - YOUR_CHAOS_API_KEY
+
+# BinaryEdge — internet scan data (paid, skip if $0 budget)
+# binaryedge:
+#   - YOUR_BE_API_KEY

@@ -1,0 +1,24 @@
+# ZeroPoint — Python Dependencies
+# Install: pip install -r requirements.txt
+
+# ── Core Async ────────────────────────────────────────────────────────────────
+motor>=3.3.2             # Async MongoDB driver (wraps PyMongo with asyncio)
+pymongo>=4.6.0           # Motor dependency, also used for IndexModel types
+
+# ── Data Validation ──────────────────────────────────────────────────────────
+pydantic>=2.5.0          # Schema validation, type enforcement
+pydantic-settings>=2.1.0 # BaseSettings for .env config loading
+
+# ── HTTP Client ───────────────────────────────────────────────────────────────
+aiohttp>=3.9.0           # Async HTTP for crt.sh, webhooks, and future enrichment
+
+# ── Integrations ─────────────────────────────────────────────────────────────
+shodan>=1.31.0           # Shodan API client (sync, wrapped in executor)
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+loguru>=0.7.2            # Structured, colourised logging with rotation
+
+# ── Dev / Testing (optional) ─────────────────────────────────────────────────
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
+# pytest-mock>=3.12.0
