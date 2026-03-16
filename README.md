@@ -42,6 +42,8 @@ domain found?
 │                 ↳ TRIGGERS notification to Discord/Telegram
 └── YES → Update: is_new=False, status="active", last_seen=NOW
                   ↳ No noise. Silent update.
+
+A "Net new assets: 0" in the ingester's summary means all discovered domains already existed in the database and were updated, not newly inserted.
 ```
 
 This is what makes ZeroPoint smart — **you only get alerted when something is genuinely new**.
@@ -79,6 +81,10 @@ cp .env.example .env
 #      (replace <YOUR_BOT_TOKEN> with your bot's token).
 #   3. Look for "chat":{"id":...}. The number is your TELEGRAM_CHAT_ID.
 #   (For group/channel IDs, add the bot to the group/channel, send a message, then check getUpdates. IDs are often negative).
+
+# --- Advanced Reconnaissance Settings ---
+# CRTSH_TIMEOUT: (default: 60) Timeout for crt.sh queries. Increased from default to handle slow responses.
+# crt.sh Retries: (Automatic) The system automatically retries crt.sh requests on 429 (rate limit), 404 (not found), and 503 (service unavailable) HTTP errors with exponential back-off, enhancing resilience.
 
 # --- Subfinder Configuration (Optional but Recommended) ---
 # To enhance subdomain discovery, configure API keys for various services
@@ -119,7 +125,7 @@ python ingestor.py --seed-program example.com --program-id my_target --run-after
 ```bash
 python3 prober.py --program-id shopify_h1
 
-# Forcely reprobe target if needed
+# Force re-probe target: Ignores last_probed timestamp and probe_status conditions to re-scan all assets.
 python3 prober.py --program-id shopify_h1 --force
 ```
 ---
@@ -204,6 +210,7 @@ zeropoint/
 | Run a specific program	      | python3 ingestor.py --program-id <program-id> |
 | Seed a new program	      | python3 ingestor.py --seed-program <program-name> |
 | Seed and run immediately	      | python3 ingestor.py --seed-program <program-name> --run-after-seed |
+| Force re-probe a program    | python3 prober.py --program-id <program-id> --force |
 
 ---
 
