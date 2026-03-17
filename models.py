@@ -25,7 +25,6 @@ class ReconSource(str, Enum):
     SHODAN    = "shodan"
     AMASS     = "amass"    # reserved
     CHAOS     = "chaos"    # reserved
-    UNKNOWN   = "unknown"
 
 
 class AssetStatus(str, Enum):
@@ -231,6 +230,7 @@ class ProbeResult(BaseModel):
     def normalise(cls, v: str) -> str:
         return v.lower().strip().rstrip(".")
 
+
 # ---------------------------------------------------------------------------
 # Finding  —  a single confirmed vulnerability from Nuclei
 # ---------------------------------------------------------------------------
@@ -267,6 +267,11 @@ class Finding(BaseModel):
     last_seen:    datetime       = Field(default_factory=datetime.utcnow)
     is_new:       bool           = True      # False after first alert sent
     scan_run_id:  Optional[str]  = None      # Links to ScanRun audit record
+
+    # Confidence flag — True when nuclei had a response-body/status matcher that
+    # confirmed the finding, False means URL-pattern match only (review before reporting)
+    confirmed:    bool           = True
+    extra:        Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("domain", mode="before")
     @classmethod

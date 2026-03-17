@@ -134,8 +134,20 @@ python3 prober.py --program-id shopify_h1 --force
 ### 4.2 Scan Targets
 
 ```bash
-# quick single-domain test
-python scanner.py --domain target.com --severity critical,high
+# Module 3 — scan all CRITICAL/HIGH assets for a specific program
+python3 scanner.py --program-id shopify_h1
+
+# Module 3 — scan all active programs in DB
+python3 scanner.py
+
+# Module 3 — force rescan everything (ignores the 72h rescan interval)
+python3 scanner.py --program-id shopify_h1 --force
+
+# Module 3 — override severity for this run only
+python3 scanner.py --program-id shopify_h1 --severity critical,high
+
+# Module 3 — quick test on a single domain (no DB write, still fires alerts)
+python3 scanner.py --domain juice-shop.herokuapp.com --severity critical,high,medium
 ```
 ---
 
@@ -233,3 +245,111 @@ zeropoint/
 - **Semaphore** to bound concurrency — prevents WAF bans
 - **Jitter** on all network requests — randomises timing signatures
 - **Modular design** — swap any tool wrapper without touching other modules
+
+---
+
+### Full three-module pipeline — complete reference
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  MODULE 1 — Ingestion (find subdomains)                         │
+│  python3 ingestor.py --program-id shopify_h1                    │
+│                                                                 │
+│  What it does:                                                  │
+│    • Runs Subfinder, crt.sh, Shodan in parallel                 │
+│    • Upserts every subdomain into MongoDB `assets`              │
+│    • Sets is_new=True on first-ever seen domains                │
+│    • Fires Discord/Telegram alert for NEW subdomains only       │
+│                                                                 │
+│  MongoDB writes:  assets collection                             │
+│  Alert trigger:   is_new=True (new subdomain discovered)        │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  MODULE 2 — Prober (HTTP probe + fingerprint)                   │
+│  python3 prober.py --program-id shopify_h1                      │
+│                                                                 │
+│  What it does:                                                  │
+│    • Reads probe_status=not_probed assets from DB               │
+│    • Runs httpx in batches, streams JSON results                │
+│    • FingerprintClassifier assigns interest_level               │
+│    • Writes http_status, tech_stack, title, cdn back to DB      │
+│    • Fires alert for CRITICAL/HIGH interest assets              │
+│                                                                 │
+│  MongoDB writes:  assets.probe_status, assets.interest_level   │
+│  Alert trigger:   interest_level = CRITICAL or HIGH            │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  MODULE 3 — Scanner (Nuclei vulnerability scan)                 │
+│  python3 scanner.py --program-id shopify_h1                     │
+│                                                                 │
+│  What it does:                                                  │
+│    • Reads interest_level=HIGH/CRITICAL + probe_status=alive    │
+│    • Groups assets by tech stack, builds targeted template tags │
+│    • Runs Nuclei, streams JSONL findings live                   │
+│    • SHA-256 dedup — same vuln never alerts twice               │
+│    • Writes findings to `findings` collection in MongoDB        │
+│    • Fires immediate alert for EVERY new finding                │
+│    • Sends end-of-run summary digest                            │
+│                                                                 │
+│  MongoDB writes:  findings collection, assets.last_scanned      │
+│  Alert trigger:   every new unique finding (all severities)     │
+└─────────────────────────────────────────────────────────────────┘
+```
+---
+### Recommended run order for a program
+```
+# First time setup — seed your target program
+python3 seed_programs.py
+
+# Step 1 — discover all subdomains
+python3 ingestor.py --program-id shopify_h1
+
+# Step 2 — probe and fingerprint everything found
+python3 prober.py --program-id shopify_h1
+
+# Step 3 — scan everything classified as HIGH or CRITICAL
+python3 scanner.py --program-id shopify_h1
+```
+---
+
+### 24/7 continuous monitoring (cron setup)
+Run all three on a schedule so new assets are automatically discovered, probed, and scanned without you touching anything:
+```bash
+# Edit crontab
+crontab -e
+
+# Add these three lines:
+
+# Module 1 — rediscover subdomains every hour
+0 * * * * cd /home/sethu/PROJECTS/ZeroPoint && python3 ingestor.py >> logs/cron.log 2>&1
+
+# Module 2 — reprobe all assets every 2 hours
+30 */2 * * * cd /home/sethu/PROJECTS/ZeroPoint && python3 prober.py >> logs/cron.log 2>&1
+
+# Module 3 — scan HIGH/CRITICAL assets every 6 hours
+0 */6 * * * cd /home/sethu/PROJECTS/ZeroPoint && python3 scanner.py >> logs/cron.log 2>&1
+```
+---
+### All CLI flags for all three modules
+```
+# ── Module 1 ──────────────────────────────────────────────────
+python3 ingestor.py                              # all active programs
+python3 ingestor.py --program-id shopify_h1     # single program
+python3 ingestor.py --domain shopify.com --program-id shopify_h1  # single domain
+
+# ── Module 2 ──────────────────────────────────────────────────
+python3 prober.py                               # all active programs
+python3 prober.py --program-id shopify_h1      # single program
+python3 prober.py --force                       # re-probe even recently probed assets
+python3 prober.py --domain api.shopify.com      # quick single-domain probe (no DB write)
+
+# ── Module 3 ──────────────────────────────────────────────────
+python3 scanner.py                              # all active programs
+python3 scanner.py --program-id shopify_h1     # single program
+python3 scanner.py --force                      # ignore 72h rescan interval
+python3 scanner.py --severity critical,high     # tighten severity filter for this run
+python3 scanner.py --domain target.com          # quick test, no DB write, still alerts
+```

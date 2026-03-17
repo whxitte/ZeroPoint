@@ -164,6 +164,7 @@ async def scan_program(
         )
 
         scanned_domains = set()
+        pending_alerts: List = []
 
         async for raw_finding in scanner.scan(batch, program_id, run.run_id):
 
@@ -182,15 +183,19 @@ async def scan_program(
             if is_new:
                 run.new_findings += 1
                 new_finding_ids.append(raw_finding.finding_id)
-
-                # ── 4b. Immediate alert for critical/high ──────────────
-                if raw_finding.severity in _IMMEDIATE_ALERT_SEVERITIES:
-                    # Fire-and-forget — don't block the scan pipeline
-                    asyncio.create_task(
-                        notify_finding(raw_finding, program_id)
-                    )
+                # Queue alert — awaited after the scan stream closes
+                # (never use create_task here — it gets silently dropped)
+                pending_alerts.append(notify_finding(raw_finding, program_id))
 
             scanned_domains.add(raw_finding.domain)
+
+        # ── Dispatch all alerts for this batch (awaited, never dropped) ──
+        if pending_alerts:
+            alert_results = await asyncio.gather(*pending_alerts, return_exceptions=True)
+            for r in alert_results:
+                if isinstance(r, Exception):
+                    logger.error(f"[scanner] Alert dispatch error: {r}")
+            logger.info(f"[scanner] {len(pending_alerts)} alert(s) sent for batch {batch_idx}")
 
         # ── 5. Stamp all scanned assets ───────────────────────────────────
         stamp_tasks = [
@@ -275,16 +280,14 @@ async def scan_single_domain(
     severity: str = "critical,high,medium",
 ) -> None:
     """
-    Dev/debug utility — scan one domain, print all findings, no DB write.
+    Quick-scan one domain — prints findings live, fires alerts, no DB write.
 
-    Runs nuclei with NO tag filter so the full template library fires.
-    This is intentionally different from the DB pipeline which uses
-    tech-stack-derived tags for speed — here we want maximum coverage.
+    Runs nuclei with NO tag filter (full template library).
+    Alerts fire via notify_finding() for every result if channels are configured.
     """
     import shutil
     from models import Asset, InterestLevel, ProbeStatus
 
-    # ── Pre-flight: verify nuclei binary exists ───────────────────────────
     nuclei_bin = settings.NUCLEI_PATH
     if not shutil.which(nuclei_bin):
         logger.error(
@@ -294,41 +297,60 @@ async def scan_single_domain(
         )
         return
 
-    # ── Synthetic asset — no tech fingerprint so full sweep fires ─────────
     fake_asset = Asset(
         domain=domain,
         program_id="__test__",
         probe_status=ProbeStatus.ALIVE,
         interest_level=InterestLevel.CRITICAL,
-        technologies=[],   # empty → no_tag_filter=True → full template library
+        technologies=[],   # empty → no_tag_filter=True → full template sweep
     )
 
     scanner          = _build_scanner(severity)
     scanner.severity = severity
     found            = 0
+    alert_tasks      = []   # collect coroutines, await them all at the end
 
     logger.info(
         f"[scanner] Quick-scan | domain={domain} | severity={severity} | "
         f"mode=full-template-sweep (no tag filter)"
     )
 
-    # no_tag_filter=True bypasses -tags so ALL templates at this severity run
     async for finding in scanner.scan(
         [fake_asset], "__test__", "test_run", no_tag_filter=True
     ):
         found += 1
-        sev = finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity)
+        sev       = finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity)
+        confirmed = finding.confirmed
+        conf_tag  = "✓ CONFIRMED" if confirmed else "⚠ UNCONFIRMED (verify manually before reporting)"
+
         print(
-            f"\n  {'─' * 52}\n"
-            f"  [{sev.upper():8}]  {finding.template_name}\n"
+            f"\n  {'─' * 54}\n"
+            f"  [{sev.upper():8}]  {finding.template_name}  [{conf_tag}]\n"
             f"  Template :  {finding.template_id}\n"
             f"  Matched  :  {finding.matched_at}\n"
-            f"  Tags     :  {', '.join(finding.tags)}\n"
+            f"  Matcher  :  {finding.matcher_name or '(none — no response confirmation)'}\n"
+            f"  Tags     :  {', '.join(finding.tags) or '—'}\n"
             + (f"  Refs     :  {finding.reference[0]}\n" if finding.reference else "")
             + (f"  curl     :  {finding.curl_command[:150]}...\n" if finding.curl_command else "")
         )
 
+        # Queue alert — do NOT fire-and-forget with create_task here because
+        # the event loop exits right after the scan and drops pending tasks.
+        alert_tasks.append(notify_finding(finding, domain))
+
     print()
+
+    # ── Await ALL alerts together after scan stream closes ────────────────
+    # This is the correct pattern — create_task() would silently drop alerts
+    # when the event loop exits before the background task runs.
+    if alert_tasks:
+        logger.info(f"[scanner] Sending {len(alert_tasks)} alert(s)...")
+        results = await asyncio.gather(*alert_tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                logger.error(f"[scanner] Alert dispatch error: {r}")
+        logger.success(f"[scanner] Alerts dispatched ✓")
+
     if found == 0:
         logger.warning(
             f"[scanner] 0 findings for {domain} at severity={severity}\n"

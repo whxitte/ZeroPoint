@@ -240,23 +240,29 @@ def _parse_nuclei_line(raw: str, program_id: str, scan_run_id: str) -> Optional[
 
     finding_id = make_finding_id(template_id, domain, matched_at)
 
+    # A finding with no matcher_name means the template fired on request alone
+    # with no response-body/status confirmation — flag it for manual review
+    matcher_name = data.get("matcher-name") or data.get("matcher_name") or ""
+    is_confirmed = bool(matcher_name.strip())
+
     return Finding(
-        finding_id     = finding_id,
-        program_id     = program_id,
-        domain         = domain,
-        template_id    = template_id,
-        template_name  = info.get("name", template_id).strip(),
-        severity       = severity,
-        matched_at     = matched_at,
-        matcher_name   = data.get("matcher-name"),
-        description    = info.get("description", "").strip() or None,
-        reference      = info.get("reference") or [],
-        tags           = info.get("tags") or [],
-        curl_command   = data.get("curl-command"),
-        request        = raw_request or None,
-        response       = raw_response or None,
+        finding_id        = finding_id,
+        program_id        = program_id,
+        domain            = domain,
+        template_id       = template_id,
+        template_name     = info.get("name", template_id).strip(),
+        severity          = severity,
+        matched_at        = matched_at,
+        matcher_name      = matcher_name or None,
+        description       = info.get("description", "").strip() or None,
+        reference         = info.get("reference") or [],
+        tags              = info.get("tags") or [],
+        curl_command      = data.get("curl-command"),
+        request           = raw_request or None,
+        response          = raw_response or None,
         extracted_results = data.get("extracted-results") or [],
-        scan_run_id    = scan_run_id,
+        scan_run_id       = scan_run_id,
+        confirmed         = is_confirmed,
     )
 
 
@@ -353,6 +359,8 @@ class NucleiScanner:
             "-include-rr",                  # capture raw HTTP request/response as PoC
             "-stats",                       # progress stats → stderr
             "-o",          output_file,     # backup output file alongside stdout
+            "-matcher-status",              # only report confirmed matcher hits (reduces FPs)
+            "-no-mhe",                      # disable matcher-based host errors (cleaner output)
         ]
 
         # ── Template sources ───────────────────────────────────────────────────
@@ -546,6 +554,8 @@ class NucleiScanner:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=2 ** 20,   # 1MB per-line buffer — needed because -include-rr
+                                 # embeds full HTTP request+response in a single JSON line
             )
 
             assert proc.stdout is not None

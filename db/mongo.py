@@ -50,7 +50,6 @@ def _apply_atlas_tls_patch() -> None:
 
     # Apply globally across the entire pymongo package
     ssl_support.get_ssl_context = patched_get_ssl_context
-    logger.debug("Applied Python 3.13 TLS legacy connection patch.")
 
 _apply_atlas_tls_patch()
 
