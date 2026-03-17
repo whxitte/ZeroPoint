@@ -395,3 +395,143 @@ async def notify_scan_summary(
         _send_telegram_message(tg_body),
     )
     logger.info(f"[alerts] Scan summary sent | program={program_id} new={new_findings}")
+
+# ---------------------------------------------------------------------------
+# Module 4: Crawler — secret and endpoint alert dispatchers
+# ---------------------------------------------------------------------------
+
+_SECRET_SEV_COLOR = {
+    "critical": 0xFF0000,
+    "high":     0xFF6600,
+    "medium":   0xFFCC00,
+    "info":     0x5865F2,
+}
+
+_SECRET_SEV_EMOJI = {
+    "critical": "🔑",
+    "high":     "🔐",
+    "medium":   "🔓",
+    "info":     "🔵",
+}
+
+
+async def notify_secret(secret, program_id: str) -> None:
+    """
+    Immediate alert for a newly discovered secret/credential.
+    `secret` is a CrawlSecret model instance.
+    This is the highest-value alert in the entire pipeline.
+    """
+    sev   = secret.severity.value if hasattr(secret.severity, "value") else str(secret.severity)
+    emoji = _SECRET_SEV_EMOJI.get(sev, "🔐")
+    color = _SECRET_SEV_COLOR.get(sev, 0x888888)
+
+    # Redact the middle of the secret value for safe logging
+    val   = secret.secret_value
+    safe_val = (val[:6] + "..." + val[-4:]) if len(val) > 12 else val[:4] + "..."
+
+    fields = [
+        {"name": "Secret Type",  "value": f"`{secret.secret_type}`",   "inline": True},
+        {"name": "Severity",     "value": f"{emoji} `{sev.upper()}`",  "inline": True},
+        {"name": "Program",      "value": f"`{program_id}`",           "inline": True},
+        {"name": "Domain",       "value": f"`{secret.domain}`",        "inline": False},
+        {"name": "Source URL",   "value": secret.source_url[:120],     "inline": False},
+        {"name": "Value (partial)", "value": f"`{safe_val}`",          "inline": False},
+        {"name": "Tool",         "value": secret.tool,                 "inline": True},
+    ]
+    if secret.context:
+        fields.append({"name": "Context", "value": f"```\n{secret.context[:300]}\n```", "inline": False})
+
+    discord_coro = _send_discord_embed(
+        title=f"{emoji}  SECRET FOUND — {secret.secret_type.upper()}",
+        description=f"**Domain:** `{secret.domain}`  |  **Type:** `{secret.secret_type}`",
+        color=color,
+        fields=fields,
+    )
+
+    tg_lines = [
+        f"<b>{emoji} ZeroPoint — SECRET FOUND</b>",
+        f"",
+        f"<b>Type:</b>     <code>{secret.secret_type}</code>",
+        f"<b>Severity:</b> <code>{sev.upper()}</code>",
+        f"<b>Domain:</b>   <code>{secret.domain}</code>",
+        f"<b>Program:</b>  <code>{program_id}</code>",
+        f"<b>URL:</b>      {secret.source_url[:100]}",
+        f"<b>Value:</b>    <code>{safe_val}</code>",
+    ]
+
+    await _dispatch(discord_coro, _send_telegram_message("\n".join(tg_lines)))
+    logger.success(f"[alerts] Secret alert | {sev.upper()} | {secret.secret_type} | {secret.domain}")
+
+
+async def notify_interesting_endpoint(endpoint, program_id: str) -> None:
+    """
+    Alert for a newly discovered interesting endpoint (login, API, upload, admin).
+    Less urgent than secrets — batched if many arrive at once.
+    `endpoint` is a CrawledEndpoint model instance.
+    """
+    tags_str = ", ".join(endpoint.interest_tags[:6]) or "—"
+    fields   = [
+        {"name": "Domain",   "value": f"`{endpoint.domain}`",  "inline": True},
+        {"name": "Program",  "value": f"`{program_id}`",       "inline": True},
+        {"name": "Source",   "value": endpoint.source,         "inline": True},
+        {"name": "Tags",     "value": tags_str,                "inline": False},
+        {"name": "URL",      "value": endpoint.url[:200],      "inline": False},
+    ]
+
+    discord_coro = _send_discord_embed(
+        title=f"🕷️  New Interesting Endpoint — `{endpoint.domain}`",
+        description=f"Tags: `{tags_str}`",
+        color=_COLOR["info"],
+        fields=fields,
+    )
+
+    tg_body = (
+        f"<b>🕷️ ZeroPoint — Interesting Endpoint</b>\n"
+        f"Domain: <code>{endpoint.domain}</code>\n"
+        f"Tags: <code>{tags_str}</code>\n"
+        f"URL: {endpoint.url[:150]}"
+    )
+
+    await _dispatch(discord_coro, _send_telegram_message(tg_body))
+
+
+async def notify_crawl_summary(
+    program_id:      str,
+    targets:         int,
+    new_endpoints:   int,
+    interesting:     int,
+    new_secrets:     int,
+    by_severity:     dict,
+) -> None:
+    """End-of-crawl digest. Only fires when there are new secrets or interesting endpoints."""
+    if new_secrets + new_endpoints == 0:
+        return
+
+    crit = by_severity.get("critical", 0)
+    high = by_severity.get("high",     0)
+    med  = by_severity.get("medium",   0)
+
+    body = (
+        f"**Program:** `{program_id}`\n"
+        f"**Targets crawled:** {targets}\n"
+        f"**New endpoints:** {new_endpoints}  |  **Interesting:** {interesting}\n"
+        f"**New secrets:** **{new_secrets}**\n"
+        f"🔑 Critical: **{crit}**  |  🔐 High: **{high}**  |  🔓 Medium: {med}"
+    )
+
+    tg_body = (
+        f"<b>🕷️ ZeroPoint — Crawl Summary</b>\n"
+        f"Program: <code>{program_id}</code>\n"
+        f"Crawled: {targets} | New endpoints: {new_endpoints} | Interesting: {interesting}\n"
+        f"Secrets: <b>{new_secrets}</b> | 🔑 {crit} crit | 🔐 {high} high | 🔓 {med} med"
+    )
+
+    await _dispatch(
+        _send_discord_embed(
+            title=f"🕷️  Crawl Summary — {program_id}",
+            description=body,
+            color=_COLOR["summary"],
+        ),
+        _send_telegram_message(tg_body),
+    )
+    logger.info(f"[alerts] Crawl summary sent | program={program_id} secrets={new_secrets}")

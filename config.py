@@ -50,9 +50,36 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID:     Optional[str] = Field(default=None)
 
     # ── Tool Paths (auto-detected if on PATH) ────────────────────────────────
-    SUBFINDER_PATH: str = Field(default="subfinder")
-    HTTPX_PATH:     str = Field(default="httpx")
-    NUCLEI_PATH:    str = Field(default="nuclei")
+    SUBFINDER_PATH:      str = Field(default="subfinder")
+    HTTPX_PATH:          str = Field(default="httpx")
+    NUCLEI_PATH:         str = Field(default="nuclei")
+    KATANA_PATH:         str = Field(default="katana")
+    WAYBACKURLS_PATH:    str = Field(default="waybackurls")
+    GAU_PATH:            str = Field(default="gau")
+    SECRETFINDER_PATH:   str = Field(
+        default="",
+        description="Full path to SecretFinder.py (e.g. /opt/SecretFinder/SecretFinder.py)",
+    )
+
+    # ── Crawler (Module 4) settings ──────────────────────────────────────────
+    CRAWLER_DEPTH:           int  = Field(default=3,    description="Katana crawl depth")
+    CRAWLER_PARALLELISM:     int  = Field(default=10,   description="Katana -parallelism (concurrent crawls per asset)")
+    CRAWLER_RATE_LIMIT:      int  = Field(default=50,   description="Katana -rate-limit (req/sec per asset)")
+    CRAWLER_TIMEOUT:         int  = Field(default=120,  description="Max seconds per Katana invocation")
+    CRAWLER_BATCH_SIZE:      int  = Field(default=20,   description="Assets per crawler batch")
+    CRAWLER_PARALLEL_BATCHES: int = Field(default=3,    description="Concurrent crawler batches")
+    CRAWLER_RECRAWL_HOURS:   int  = Field(default=48,   description="Re-crawl assets after N hours")
+    CRAWLER_JS_ANALYSIS:     bool = Field(default=True, description="Run SecretFinder on JS files")
+    CRAWLER_WAYBACK:         bool = Field(default=True, description="Fetch historical URLs via waybackurls")
+    CRAWLER_GAU:             bool = Field(default=True, description="Fetch URLs via gau (GetAllUrls)")
+    CRAWLER_MIN_INTEREST:    str  = Field(
+        default="medium",
+        description="Minimum interest_level to qualify for crawling (medium/high/critical)",
+    )
+    SECRET_MIN_ENTROPY:      float = Field(
+        default=3.5,
+        description="Shannon entropy threshold — values below this are likely false positives",
+    )
 
     # ── Prober (Module 2) settings ───────────────────────────────────────────
     PROBER_BATCH_SIZE:       int   = Field(default=200,  description="Domains per httpx invocation")

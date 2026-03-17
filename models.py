@@ -292,3 +292,103 @@ class ScanRun(BaseModel):
     templates_used: List[str]    = Field(default_factory=list)
     errors:       List[str]      = Field(default_factory=list)
     success:      bool           = True
+
+
+# ---------------------------------------------------------------------------
+# Module 4: Crawler & JS Analysis models
+# ---------------------------------------------------------------------------
+
+class SecretSeverity(str, Enum):
+    """
+    Triage severity for a discovered secret/sensitive value.
+    CRITICAL → live credential (API key with working auth, private key)
+    HIGH     → likely valid secret (pattern match + entropy threshold)
+    MEDIUM   → possible secret (pattern match, lower entropy)
+    INFO     → interesting string worth manual review
+    """
+    CRITICAL = "critical"
+    HIGH     = "high"
+    MEDIUM   = "medium"
+    INFO     = "info"
+
+
+class CrawlSecret(BaseModel):
+    """
+    A single secret / sensitive value found in JS or page source.
+    Stored in the `secrets` collection.
+
+    Dedup key: sha256(secret_type + domain + secret_value[:32])
+    Same secret type on same domain never alerts twice.
+    """
+    secret_id:    str                    # sha256 dedup fingerprint
+    program_id:   str
+    domain:       str
+    source_url:   str                    # JS file or page URL where found
+    secret_type:  str                    # "aws_access_key", "github_token", etc.
+    secret_value: str                    # The actual matched value (truncated to 120 chars)
+    severity:     SecretSeverity         = SecretSeverity.HIGH
+    line_number:  Optional[int]          = None
+    context:      Optional[str]          = None   # Surrounding code context (±1 line)
+    tool:         str                    = "secretfinder"  # "secretfinder" | "trufflehog" | "regex"
+    first_seen:   datetime               = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen:    datetime               = Field(default_factory=lambda: datetime.now(timezone.utc))
+    is_new:       bool                   = True
+    crawl_run_id: Optional[str]          = None
+
+    @field_validator("domain", mode="before")
+    @classmethod
+    def normalise_domain(cls, v: str) -> str:
+        return v.lower().strip().rstrip(".")
+
+    @field_validator("secret_value", mode="before")
+    @classmethod
+    def truncate_value(cls, v: str) -> str:
+        return v[:120] if v else v
+
+
+class CrawledEndpoint(BaseModel):
+    """
+    A URL endpoint discovered by the crawler.
+    Stored in the `endpoints` collection.
+
+    Interesting endpoints (login, upload, admin, API) feed directly
+    into Module 3 as additional scanner targets.
+
+    Dedup key: sha256(domain + url_path)
+    """
+    endpoint_id:  str                    # sha256 dedup fingerprint
+    program_id:   str
+    domain:       str
+    url:          str                    # Full URL
+    url_path:     str                    # Path only for dedup (strips params)
+    method:       str                    = "GET"
+    status_code:  Optional[int]          = None
+    content_type: Optional[str]          = None
+    source:       str                    = "katana"   # "katana" | "waybackurls" | "gau"
+    is_interesting: bool                 = False      # Set by endpoint classifier
+    interest_tags:  List[str]            = Field(default_factory=list)   # ["login","api","upload"]
+    first_seen:   datetime               = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen:    datetime               = Field(default_factory=lambda: datetime.now(timezone.utc))
+    is_new:       bool                   = True
+    crawl_run_id: Optional[str]          = None
+
+    @field_validator("domain", mode="before")
+    @classmethod
+    def normalise_domain(cls, v: str) -> str:
+        return v.lower().strip().rstrip(".")
+
+
+class CrawlRun(BaseModel):
+    """Audit record for a single crawl run — stored in `crawl_runs` collection."""
+    run_id:          str      = Field(default_factory=lambda: __import__("uuid").uuid4().hex)
+    program_id:      str
+    started_at:      datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    finished_at:     Optional[datetime] = None
+    targets:         int      = 0    # Assets crawled
+    endpoints_found: int      = 0    # Total unique URLs discovered
+    new_endpoints:   int      = 0    # Net-new endpoints
+    js_files:        int      = 0    # JS files analysed
+    secrets_found:   int      = 0    # Total secret matches
+    new_secrets:     int      = 0    # Net-new secrets
+    errors:          List[str] = Field(default_factory=list)
+    success:         bool     = True

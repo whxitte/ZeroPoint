@@ -61,6 +61,14 @@ go install github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 nuclei -update-templates   # pulls ~/.nuclei-templates automatically
 
+go install github.com/projectdiscovery/katana/cmd/katana@latest
+go install github.com/tomnomnom/waybackurls@latest
+go install github.com/lc/gau/v2/cmd/gau@latest
+
+# Optional but recommended — SecretFinder
+git clone https://github.com/m4ll0k/SecretFinder.git /opt/SecretFinder
+pip install jsbeautifier requests
+
 # Install Python deps
 pip install -r requirements.txt
 ```
@@ -312,6 +320,9 @@ python3 prober.py --program-id shopify_h1
 
 # Step 3 — scan everything classified as HIGH or CRITICAL
 python3 scanner.py --program-id shopify_h1
+
+# crawl endpoints + find secrets
+python3 crawler.py  --program-id shopify_h1   
 ```
 ---
 
@@ -352,4 +363,10 @@ python3 scanner.py --program-id shopify_h1     # single program
 python3 scanner.py --force                      # ignore 72h rescan interval
 python3 scanner.py --severity critical,high     # tighten severity filter for this run
 python3 scanner.py --domain target.com          # quick test, no DB write, still alerts
+
+# ── Module 4 ──────────────────────────────────────────────────
+python3 crawler.py --domain example.com             # Quick test on one domain (no DB write)
+python3 crawler.py --program-id shopify_h1          # Crawl a specific program
+python3 crawler.py --program-id shopify_h1 --force  # Force re-crawl (ignore 48h interval)
+python3 crawler.py                                  # All programs
 ```

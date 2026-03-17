@@ -225,8 +225,8 @@ async def run_crtsh(root_domain: str) -> ReconResult:
 
             break  # success — exit retry loop
 
-        except aiohttp.ClientError as exc:
-            msg = f"[crt.sh] Network error (attempt {attempt}): {exc}"
+        except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError) as exc:
+            msg = f"[crt.sh] Network error or timeout (attempt {attempt}): {exc}"
             logger.warning(msg)
             errors.append(msg)
             await asyncio.sleep(2 ** attempt)
