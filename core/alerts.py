@@ -47,8 +47,18 @@ _INTEREST_EMOJI = {
 
 
 # ---------------------------------------------------------------------------
-# Transport helpers
+# Transport helpers & Rate-Limiting
 # ---------------------------------------------------------------------------
+
+_NOTIFY_SEMAPHORE: asyncio.Semaphore | None = None
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """Lazy init semaphore to ensure it's in the correct loop."""
+    global _NOTIFY_SEMAPHORE
+    if _NOTIFY_SEMAPHORE is None:
+        _NOTIFY_SEMAPHORE = asyncio.Semaphore(settings.NOTIFICATIONS_CONCURRENCY)
+    return _NOTIFY_SEMAPHORE
+
 
 async def _send_discord_embed(title: str, description: str, color: int, fields: list | None = None) -> None:
     """Post a single embed to the configured Discord webhook."""
@@ -66,18 +76,21 @@ async def _send_discord_embed(title: str, description: str, color: int, fields: 
 
     payload = {"embeds": [embed]}
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                settings.DISCORD_WEBHOOK_URL,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status not in (200, 204):
-                    body = await resp.text()
-                    logger.warning(f"Discord webhook returned {resp.status}: {body[:200]}")
-    except aiohttp.ClientError as exc:
-        logger.error(f"Discord notification failed: {exc}")
+    async with _get_semaphore():
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    settings.DISCORD_WEBHOOK_URL,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status not in (200, 204):
+                        body = await resp.text()
+                        logger.warning(f"Discord webhook returned {resp.status}: {body[:200]}")
+        except aiohttp.ClientError as exc:
+            logger.error(f"Discord notification failed: {repr(exc)}")
+        except Exception as exc:
+            logger.error(f"Unexpected Discord error: {repr(exc)}")
 
 
 async def _send_telegram_message(text: str) -> None:
@@ -92,18 +105,43 @@ async def _send_telegram_message(text: str) -> None:
         "parse_mode": "HTML",
     }
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    logger.warning(f"Telegram API returned {resp.status}: {body[:200]}")
-    except aiohttp.ClientError as exc:
-        logger.error(f"Telegram notification failed: {exc}")
+    async with _get_semaphore():
+        for attempt in range(settings.TELEGRAM_MAX_RETRIES + 1):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        url,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status == 200:
+                            return
+                        
+                        body = await resp.text()
+                        if resp.status == 429:
+                            # Parse retry_after from Telegram JSON
+                            try:
+                                data = await resp.json()
+                                wait = data.get("parameters", {}).get("retry_after", 3)
+                            except:
+                                wait = 5
+                            logger.warning(f"Telegram 429: Rate limited. Retrying after {wait}s (attempt {attempt+1})")
+                            await asyncio.sleep(wait)
+                            continue
+                        
+                        logger.warning(f"Telegram API returned {resp.status}: {body[:200]}")
+                        break # Other errors don't retry
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                if attempt < settings.TELEGRAM_MAX_RETRIES:
+                    wait = (settings.TELEGRAM_RETRY_AFTER_MS / 1000) * (2 ** attempt)
+                    logger.warning(f"Telegram transport error: {repr(exc)}. Retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(f"Telegram notification failed after retries: {repr(exc)}")
+            except Exception as exc:
+                logger.error(f"Unexpected Telegram error: {repr(exc)}")
+                break
 
 
 async def _dispatch(discord_coro, telegram_coro) -> None:
@@ -111,7 +149,7 @@ async def _dispatch(discord_coro, telegram_coro) -> None:
     results = await asyncio.gather(discord_coro, telegram_coro, return_exceptions=True)
     for r in results:
         if isinstance(r, Exception):
-            logger.error(f"[alerts] Dispatch exception: {r}")
+            logger.error(f"[alerts] Dispatch exception: {repr(r)}")
 
 
 # ---------------------------------------------------------------------------

@@ -150,6 +150,10 @@ class Settings(BaseSettings):
     # ── Concurrency & Rate-Limiting ──────────────────────────────────────────
     MAX_CONCURRENT_PROGRAMS: int   = Field(default=3)
     MAX_CONCURRENT_TOOLS:    int   = Field(default=3)
+    NOTIFICATIONS_CONCURRENCY: int = Field(default=5, description="Max simultaneous alert messages")
+    TELEGRAM_MAX_RETRIES:    int   = Field(default=3)
+    TELEGRAM_RETRY_AFTER_MS: int = Field(default=1000)
+
     SUBFINDER_TIMEOUT:       int   = Field(default=300, description="Seconds")
     CRTSH_TIMEOUT:           int   = Field(default=30)
     CRTSH_RETRIES:           int   = Field(default=3)
