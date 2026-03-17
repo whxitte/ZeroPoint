@@ -58,6 +58,8 @@ This is what makes ZeroPoint smart — **you only get alerted when something is 
 # Install Go tools
 go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+nuclei -update-templates   # pulls ~/.nuclei-templates automatically
 
 # Install Python deps
 pip install -r requirements.txt
@@ -127,6 +129,13 @@ python3 prober.py --program-id shopify_h1
 
 # Force re-probe target: Ignores last_probed timestamp and probe_status conditions to re-scan all assets.
 python3 prober.py --program-id shopify_h1 --force
+```
+
+### 4.2 Scan Targets
+
+```bash
+# quick single-domain test
+python scanner.py --domain target.com --severity critical,high
 ```
 ---
 

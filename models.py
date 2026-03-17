@@ -69,6 +69,28 @@ class ProgramPlatform(str, Enum):
     PRIVATE   = "private"
 
 
+class ScanSeverity(str, Enum):
+    """
+    Nuclei finding severity levels — mirrors Nuclei's own severity enum.
+    Used for deduplication fingerprinting and alert routing.
+    """
+    CRITICAL  = "critical"
+    HIGH      = "high"
+    MEDIUM    = "medium"
+    LOW       = "low"
+    INFO      = "info"
+    UNKNOWN   = "unknown"
+
+
+class ScanStatus(str, Enum):
+    """Scan lifecycle state for an asset in the scanner queue."""
+    QUEUED    = "queued"     # Waiting to be scanned
+    SCANNING  = "scanning"   # Currently being scanned
+    DONE      = "done"       # Scan completed (with or without findings)
+    ERROR     = "error"      # Scanner crashed on this asset
+    SKIPPED   = "skipped"    # Skipped (e.g. dead host at scan time)
+
+
 # ---------------------------------------------------------------------------
 # Program  —  top-level entity; one entry per bug bounty program
 # ---------------------------------------------------------------------------
@@ -208,3 +230,59 @@ class ProbeResult(BaseModel):
     @classmethod
     def normalise(cls, v: str) -> str:
         return v.lower().strip().rstrip(".")
+
+# ---------------------------------------------------------------------------
+# Finding  —  a single confirmed vulnerability from Nuclei
+# ---------------------------------------------------------------------------
+
+class Finding(BaseModel):
+    """
+    Persisted to the `findings` collection.
+
+    Deduplication key: sha256(template_id + domain + matched_at)
+    This ensures the same vuln on the same endpoint is never double-alerted,
+    even across multiple scan runs (idempotency guarantee).
+    """
+    # Identity
+    finding_id:   str                       # sha256 dedup fingerprint
+    program_id:   str
+    domain:       str
+
+    # Nuclei output fields
+    template_id:  str                        # e.g. "CVE-2021-44228"
+    template_name: str                       # Human-readable name
+    severity:     ScanSeverity
+    matched_at:   str                        # URL/endpoint where the vuln was confirmed
+    matcher_name: Optional[str]  = None      # Which matcher fired (e.g. "status-200")
+    description:  Optional[str]  = None
+    reference:    List[str]      = Field(default_factory=list)  # CVE links etc.
+    tags:         List[str]      = Field(default_factory=list)
+    curl_command: Optional[str]  = None      # Nuclei's -include-rr curl reproduction
+    request:      Optional[str]  = None      # Raw HTTP request
+    response:     Optional[str]  = None      # Truncated raw HTTP response
+    extracted_results: List[str] = Field(default_factory=list)
+
+    # Pipeline metadata
+    first_seen:   datetime       = Field(default_factory=datetime.utcnow)
+    last_seen:    datetime       = Field(default_factory=datetime.utcnow)
+    is_new:       bool           = True      # False after first alert sent
+    scan_run_id:  Optional[str]  = None      # Links to ScanRun audit record
+
+    @field_validator("domain", mode="before")
+    @classmethod
+    def normalise_domain(cls, v: str) -> str:
+        return v.lower().strip().rstrip(".")
+
+
+class ScanRun(BaseModel):
+    """Audit record for a single scanner run — stored in `scan_runs` collection."""
+    run_id:       str            = Field(default_factory=lambda: __import__("uuid").uuid4().hex)
+    program_id:   str
+    started_at:   datetime       = Field(default_factory=datetime.utcnow)
+    finished_at:  Optional[datetime] = None
+    targets:      int            = 0         # Total assets submitted
+    findings:     int            = 0         # Total Nuclei hits
+    new_findings: int            = 0         # Net-new after dedup
+    templates_used: List[str]    = Field(default_factory=list)
+    errors:       List[str]      = Field(default_factory=list)
+    success:      bool           = True

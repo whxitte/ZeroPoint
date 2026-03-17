@@ -263,3 +263,135 @@ async def notify_probe_summary(
         _send_telegram_message(tg_summary),
     )
 
+# ---------------------------------------------------------------------------
+# Module 3: Vulnerability finding notifications
+# ---------------------------------------------------------------------------
+
+_SEV_COLOR = {
+    "critical": 0xFF0000,   # Red
+    "high":     0xFF6600,   # Orange
+    "medium":   0xFFCC00,   # Yellow
+    "low":      0x00CC44,   # Green
+    "info":     0x5865F2,   # Blue
+    "unknown":  0x888888,   # Grey
+}
+
+_SEV_EMOJI = {
+    "critical": "🚨",
+    "high":     "🔴",
+    "medium":   "🟡",
+    "low":      "🟢",
+    "info":     "🔵",
+    "unknown":  "⚪",
+}
+
+
+async def notify_finding(finding, program_id: str) -> None:
+    """
+    Fire an IMMEDIATE rich alert for a single new Nuclei finding.
+    This is the money alert — CRITICAL/HIGH fire the moment Nuclei reports them.
+
+    `finding` is a Finding model instance (typed loosely to avoid circular import).
+    """
+    sev   = finding.severity.lower() if hasattr(finding.severity, "lower") else str(finding.severity)
+    emoji = _SEV_EMOJI.get(sev, "⚪")
+    color = _SEV_COLOR.get(sev, 0x888888)
+
+    refs      = " | ".join(finding.reference[:3]) if finding.reference else "—"
+    tags      = ", ".join(finding.tags[:8])        if finding.tags      else "—"
+    extracted = "\n".join(f"  `{r}`" for r in finding.extracted_results[:5]) or "—"
+
+    # ── Discord: rich embed with all PoC context ──────────────────────────
+    fields = [
+        {"name": "Template",    "value": f"`{finding.template_id}`",              "inline": True},
+        {"name": "Severity",    "value": f"{emoji} `{sev.upper()}`",              "inline": True},
+        {"name": "Program",     "value": f"`{program_id}`",                       "inline": True},
+        {"name": "Matched At",  "value": finding.matched_at[:120],                "inline": False},
+        {"name": "Tags",        "value": tags,                                    "inline": False},
+        {"name": "References",  "value": refs[:300],                              "inline": False},
+    ]
+    if finding.extracted_results:
+        fields.append({"name": "Extracted", "value": extracted[:400], "inline": False})
+    if finding.description:
+        fields.append({"name": "Description", "value": finding.description[:300], "inline": False})
+    if finding.curl_command:
+        # Truncate curl command for Discord — full cmd is in DB
+        fields.append({
+            "name": "PoC (curl)",
+            "value": f"```\n{finding.curl_command[:800]}\n```",
+            "inline": False,
+        })
+
+    discord_coro = _send_discord_embed(
+        title=f"{emoji}  {sev.upper()} — {finding.template_name}",
+        description=f"**Domain:** `{finding.domain}`",
+        color=color,
+        fields=fields,
+    )
+
+    # ── Telegram: concise but complete ────────────────────────────────────
+    tg_lines = [
+        f"<b>{emoji} ZeroPoint — {sev.upper()} Finding</b>",
+        f"",
+        f"<b>Template:</b>  <code>{finding.template_id}</code>",
+        f"<b>Name:</b>      {finding.template_name}",
+        f"<b>Domain:</b>    <code>{finding.domain}</code>",
+        f"<b>Program:</b>   <code>{program_id}</code>",
+        f"<b>Matched:</b>   {finding.matched_at[:100]}",
+    ]
+    if finding.description:
+        tg_lines.append(f"<b>Desc:</b>      {finding.description[:200]}")
+    if finding.reference:
+        tg_lines.append(f"<b>Ref:</b>       {finding.reference[0][:100]}")
+
+    telegram_coro = _send_telegram_message("\n".join(tg_lines))
+
+    await _dispatch(discord_coro, telegram_coro)
+    logger.log(
+        "SUCCESS" if sev == "critical" else "INFO",
+        f"[alerts] Finding alert sent | {sev.upper()} | {finding.template_id} | {finding.domain}",
+    )
+
+
+async def notify_scan_summary(
+    program_id:   str,
+    targets:      int,
+    new_findings: int,
+    by_severity:  dict,   # {"critical": 2, "high": 5, ...}
+    scan_run_id:  str,
+) -> None:
+    """
+    End-of-scan digest. Only sent when there are new findings.
+    """
+    if new_findings == 0:
+        return
+
+    crit = by_severity.get("critical", 0)
+    high = by_severity.get("high",     0)
+    med  = by_severity.get("medium",   0)
+    low  = by_severity.get("low",      0)
+
+    body = (
+        f"**Program:** `{program_id}`\n"
+        f"**Targets scanned:** {targets}\n"
+        f"**New findings:** **{new_findings}**\n\n"
+        f"🚨 Critical: **{crit}**  |  🔴 High: **{high}**  "
+        f"|  🟡 Medium: {med}  |  🟢 Low: {low}"
+    )
+
+    tg_body = (
+        f"<b>🏁 ZeroPoint — Scan Complete</b>\n"
+        f"Program: <code>{program_id}</code>\n"
+        f"Targets: {targets} | New findings: <b>{new_findings}</b>\n"
+        f"🚨 {crit} critical | 🔴 {high} high | 🟡 {med} medium | 🟢 {low} low"
+    )
+
+    await _dispatch(
+        _send_discord_embed(
+            title=f"🏁  Scan Summary — {program_id}",
+            description=body,
+            color=_COLOR["summary"],
+        ),
+        _send_telegram_message(tg_body),
+    )
+    logger.info(f"[alerts] Scan summary sent | program={program_id} new={new_findings}")

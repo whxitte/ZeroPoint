@@ -65,6 +65,51 @@ class Settings(BaseSettings):
     PROBER_SCREENSHOT:       bool  = Field(default=False, description="Enable httpx -screenshot (slow)")
     PROBER_SCREENSHOT_DIR:   str   = Field(default="data/screenshots")
 
+    # ── Scanner (Module 3) settings ──────────────────────────────────────────
+    NUCLEI_TEMPLATES_PATH:            str  = Field(
+        default="",
+        description="Official nuclei-templates dir. Empty = nuclei auto-manages ~/.nuclei-templates",
+    )
+    NUCLEI_COMMUNITY_TEMPLATES_PATH:  str  = Field(
+        default="",
+        description="Path to nuclei-templates-community checkout (optional)",
+    )
+    NUCLEI_CUSTOM_TEMPLATES:          str  = Field(
+        default="",
+        description="Path to your own custom templates directory (optional)",
+    )
+    NUCLEI_FUZZING_TEMPLATES_PATH:    str  = Field(
+        default="",
+        description="Path to nuclei-templates/fuzzing directory. Enable with NUCLEI_ENABLE_FUZZING=true",
+    )
+    NUCLEI_ENABLE_FUZZING:            bool = Field(
+        default=True,
+        description="Enable passive fuzzing templates (nuclei -passive flag applied automatically)",
+    )
+    NUCLEI_SEVERITY:          str  = Field(
+        default="critical,high,medium,low,info",
+        description="All severities — every finding gets an immediate alert",
+    )
+    NUCLEI_RATE_LIMIT:        int  = Field(default=50,  description="Nuclei -rate-limit (req/sec)")
+    NUCLEI_CONCURRENCY:       int  = Field(default=25,  description="Nuclei -c (template concurrency)")
+    NUCLEI_BULK_SIZE:         int  = Field(default=25,  description="Nuclei -bulk-size")
+    NUCLEI_TIMEOUT:           int  = Field(default=600, description="Max seconds per Nuclei invocation")
+    NUCLEI_RETRIES:           int  = Field(default=1)
+    NUCLEI_BATCH_SIZE:        int  = Field(default=50,  description="Targets per Nuclei invocation")
+    NUCLEI_RESCAN_HOURS:      int  = Field(default=72,  description="Re-scan assets after N hours")
+    NUCLEI_INCLUDE_TAGS:      str  = Field(
+        default="",
+        description="Extra tags to always include alongside tech-derived tags",
+    )
+    NUCLEI_EXCLUDE_TAGS:      str  = Field(
+        default="dos",
+        description="Tags to never run. 'fuzz' removed — fuzzing enabled via NUCLEI_ENABLE_FUZZING",
+    )
+    SCANNER_MIN_INTEREST:     str  = Field(
+        default="high",
+        description="Minimum interest_level to qualify for scanning: high or critical",
+    )
+
     # ── Concurrency & Rate-Limiting ──────────────────────────────────────────
     MAX_CONCURRENT_PROGRAMS: int   = Field(default=3)
     MAX_CONCURRENT_TOOLS:    int   = Field(default=3)
