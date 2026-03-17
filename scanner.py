@@ -144,8 +144,10 @@ async def scan_program(
     # ── 2. Chunk into batches ─────────────────────────────────────────────
     batch_size = settings.NUCLEI_BATCH_SIZE
     batches    = [assets[i: i + batch_size] for i in range(0, len(assets), batch_size)]
+    parallel   = max(1, settings.NUCLEI_PARALLEL_BATCHES)
     logger.info(
-        f"[scanner] {len(assets)} targets → {len(batches)} batch(es) × {batch_size}"
+        f"[scanner] {len(assets)} targets → {len(batches)} batch(es) × {batch_size} "
+        f"| parallel={parallel} nuclei processes"
     )
 
     # Override severity if passed via CLI
@@ -155,54 +157,71 @@ async def scan_program(
     sev_counter: Counter = Counter()
     new_finding_ids: List[str] = []
 
-    # ── 3. Process each batch ─────────────────────────────────────────────
-    for batch_idx, batch in enumerate(batches, start=1):
-        logger.info(
-            f"[scanner] Batch {batch_idx}/{len(batches)} | "
-            f"{len(batch)} targets | "
-            f"interest={set(a.interest_level for a in batch)}"
-        )
+    # Thread-safe accumulators shared across parallel batch coroutines
+    import threading
+    _lock = asyncio.Lock()
 
-        scanned_domains = set()
-        pending_alerts: List = []
+    # ── 3. Process batches in parallel (semaphore-controlled) ─────────────
+    semaphore = asyncio.Semaphore(parallel)
 
-        async for raw_finding in scanner.scan(batch, program_id, run.run_id):
+    async def _run_batch(batch_idx: int, batch: list) -> None:
+        """Run one nuclei batch, write findings, queue alerts — all under semaphore."""
+        async with semaphore:
+            logger.info(
+                f"[scanner] → Batch {batch_idx}/{len(batches)} starting | "
+                f"{len(batch)} targets | "
+                f"interest={set(a.interest_level for a in batch)}"
+            )
 
-            # ── 4a. Upsert to DB (dedup enforced) ─────────────────────
-            try:
-                is_new = await upsert_finding(raw_finding)
-            except Exception as exc:
-                logger.error(f"[scanner] DB write failed: {exc}")
-                run.errors.append(str(exc))
-                continue
+            pending_alerts: List = []
 
-            run.findings += 1
-            sev_key = raw_finding.severity.value if hasattr(raw_finding.severity, "value") else str(raw_finding.severity)
-            sev_counter[sev_key] += 1
+            async for raw_finding in scanner.scan(batch, program_id, run.run_id):
 
-            if is_new:
-                run.new_findings += 1
-                new_finding_ids.append(raw_finding.finding_id)
-                # Queue alert — awaited after the scan stream closes
-                # (never use create_task here — it gets silently dropped)
-                pending_alerts.append(notify_finding(raw_finding, program_id))
+                # Upsert to DB (dedup enforced)
+                try:
+                    is_new = await upsert_finding(raw_finding)
+                except Exception as exc:
+                    logger.error(f"[scanner] DB write failed: {exc}")
+                    async with _lock:
+                        run.errors.append(str(exc))
+                    continue
 
-            scanned_domains.add(raw_finding.domain)
+                sev_key = (
+                    raw_finding.severity.value
+                    if hasattr(raw_finding.severity, "value")
+                    else str(raw_finding.severity)
+                )
 
-        # ── Dispatch all alerts for this batch (awaited, never dropped) ──
-        if pending_alerts:
-            alert_results = await asyncio.gather(*pending_alerts, return_exceptions=True)
-            for r in alert_results:
-                if isinstance(r, Exception):
-                    logger.error(f"[scanner] Alert dispatch error: {r}")
-            logger.info(f"[scanner] {len(pending_alerts)} alert(s) sent for batch {batch_idx}")
+                async with _lock:
+                    run.findings += 1
+                    sev_counter[sev_key] += 1
+                    if is_new:
+                        run.new_findings += 1
+                        new_finding_ids.append(raw_finding.finding_id)
 
-        # ── 5. Stamp all scanned assets ───────────────────────────────────
-        stamp_tasks = [
-            mark_asset_scanned(a.domain, run.run_id)
-            for a in batch
-        ]
-        await asyncio.gather(*stamp_tasks, return_exceptions=True)
+                if is_new:
+                    pending_alerts.append(notify_finding(raw_finding, program_id))
+
+            # Dispatch alerts for this batch
+            if pending_alerts:
+                alert_results = await asyncio.gather(*pending_alerts, return_exceptions=True)
+                for r in alert_results:
+                    if isinstance(r, Exception):
+                        logger.error(f"[scanner] Alert error: {r}")
+                logger.info(
+                    f"[scanner] ✓ Batch {batch_idx} done | "
+                    f"{len(pending_alerts)} alert(s) sent"
+                )
+
+            # Stamp all assets in this batch with last_scanned timestamp
+            stamp_tasks = [mark_asset_scanned(a.domain, run.run_id) for a in batch]
+            await asyncio.gather(*stamp_tasks, return_exceptions=True)
+
+    # Launch all batch coroutines — semaphore ensures only `parallel` run at once
+    await asyncio.gather(
+        *[_run_batch(idx, batch) for idx, batch in enumerate(batches, start=1)],
+        return_exceptions=True,
+    )
 
     # ── 6. Flip is_new=False on all alerted findings ──────────────────────
     if new_finding_ids:

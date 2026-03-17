@@ -96,6 +96,16 @@ class Settings(BaseSettings):
     NUCLEI_TIMEOUT:           int  = Field(default=600, description="Max seconds per Nuclei invocation")
     NUCLEI_RETRIES:           int  = Field(default=1)
     NUCLEI_BATCH_SIZE:        int  = Field(default=50,  description="Targets per Nuclei invocation")
+    NUCLEI_PARALLEL_BATCHES:  int  = Field(
+        default=3,
+        description=(
+            "How many Nuclei processes to run simultaneously. "
+            "Each process handles one batch of NUCLEI_BATCH_SIZE targets. "
+            "Set to 1 to disable parallelism. "
+            "Effective total req/sec = NUCLEI_RATE_LIMIT × NUCLEI_PARALLEL_BATCHES. "
+            "Keep NUCLEI_RATE_LIMIT × NUCLEI_PARALLEL_BATCHES under ~200 to avoid WAF bans."
+        ),
+    )
     NUCLEI_RESCAN_HOURS:      int  = Field(default=72,  description="Re-scan assets after N hours")
     NUCLEI_INCLUDE_TAGS:      str  = Field(
         default="",
@@ -114,7 +124,7 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_PROGRAMS: int   = Field(default=3)
     MAX_CONCURRENT_TOOLS:    int   = Field(default=3)
     SUBFINDER_TIMEOUT:       int   = Field(default=300, description="Seconds")
-    CRTSH_TIMEOUT:           int   = Field(default=60)
+    CRTSH_TIMEOUT:           int   = Field(default=30)
     CRTSH_RETRIES:           int   = Field(default=3)
     RATE_LIMIT_MIN_JITTER:   float = Field(default=0.5, description="Seconds")
     RATE_LIMIT_MAX_JITTER:   float = Field(default=2.5, description="Seconds")
