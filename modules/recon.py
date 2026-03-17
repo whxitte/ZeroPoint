@@ -346,12 +346,13 @@ async def discover_subdomains(root_domain: str) -> List[ReconResult]:
     processed_results: List[ReconResult] = []
     for result in results:
         if isinstance(result, Exception):
-            logger.error(f"[Recon] Tool failed for {root_domain}: {result}")
+            err_msg = repr(result)
+            logger.error(f"[Recon] Tool failed for {root_domain}: {err_msg}")
             # Create a placeholder ReconResult to represent the failed tool
             # The specific source is unknown here, so we might need a more
             # sophisticated way to map exceptions back to their origin.
             # For now, we'll log it as a generic recon error.
-            processed_results.append(ReconResult(source=ReconSource.UNKNOWN, domains=[], errors=[str(result)]))
+            processed_results.append(ReconResult(source=ReconSource.UNKNOWN, domains=[], errors=[err_msg]))
         else:
             processed_results.append(result)
     

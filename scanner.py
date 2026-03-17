@@ -35,7 +35,7 @@ import asyncio
 import sys
 import uuid
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from loguru import logger
@@ -115,7 +115,7 @@ async def scan_program(
     run = ScanRun(
         run_id=uuid.uuid4().hex,
         program_id=program_id,
-        started_at=datetime.utcnow(),
+        started_at=datetime.now(timezone.utc),
         templates_used=[settings.NUCLEI_TEMPLATES_PATH or "default"],
     )
     await save_scan_run(run)  # save at start so we can track in-progress runs
@@ -136,7 +136,7 @@ async def scan_program(
 
     if not assets:
         logger.info(f"[scanner] No targets to scan for {program_id}")
-        run.finished_at = datetime.utcnow()
+        run.finished_at = datetime.now(timezone.utc)
         run.success     = True
         await save_scan_run(run)
         return run
@@ -239,7 +239,7 @@ async def scan_program(
     )
 
     # ── 8. Save completed run record ──────────────────────────────────────
-    run.finished_at = datetime.utcnow()
+    run.finished_at = datetime.now(timezone.utc)
     run.success     = len(run.errors) == 0
     await save_scan_run(run)
 

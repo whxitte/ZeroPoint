@@ -7,7 +7,7 @@ Every byte of data entering or leaving ZeroPoint is validated here.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -25,6 +25,7 @@ class ReconSource(str, Enum):
     SHODAN    = "shodan"
     AMASS     = "amass"    # reserved
     CHAOS     = "chaos"    # reserved
+    UNKNOWN   = "unknown"  # for tool errors
 
 
 class AssetStatus(str, Enum):
@@ -104,8 +105,8 @@ class Program(BaseModel):
     wildcards:  List[str] = Field(default_factory=list)  # "*.example.com"
     is_active:  bool      = True
     notes:      Optional[str] = None
-    created_at: datetime  = Field(default_factory=datetime.utcnow)
-    updated_at: datetime  = Field(default_factory=datetime.utcnow)
+    created_at: datetime  = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime  = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @field_validator("domains", "wildcards", mode="before")
     @classmethod
@@ -138,8 +139,8 @@ class Asset(BaseModel):
     ip_addresses: List[str]        = Field(default_factory=list)
     status:      AssetStatus       = AssetStatus.NEW
     is_new:      bool              = True
-    first_seen:  datetime          = Field(default_factory=datetime.utcnow)
-    last_seen:   datetime          = Field(default_factory=datetime.utcnow)
+    first_seen:  datetime          = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen:   datetime          = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # ── Module 2: HTTP Probe fields (set by Prober) ─────────────────────
     probe_status:    ProbeStatus    = ProbeStatus.NOT_PROBED
@@ -263,8 +264,8 @@ class Finding(BaseModel):
     extracted_results: List[str] = Field(default_factory=list)
 
     # Pipeline metadata
-    first_seen:   datetime       = Field(default_factory=datetime.utcnow)
-    last_seen:    datetime       = Field(default_factory=datetime.utcnow)
+    first_seen:   datetime       = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen:    datetime       = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_new:       bool           = True      # False after first alert sent
     scan_run_id:  Optional[str]  = None      # Links to ScanRun audit record
 
@@ -283,7 +284,7 @@ class ScanRun(BaseModel):
     """Audit record for a single scanner run — stored in `scan_runs` collection."""
     run_id:       str            = Field(default_factory=lambda: __import__("uuid").uuid4().hex)
     program_id:   str
-    started_at:   datetime       = Field(default_factory=datetime.utcnow)
+    started_at:   datetime       = Field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at:  Optional[datetime] = None
     targets:      int            = 0         # Total assets submitted
     findings:     int            = 0         # Total Nuclei hits

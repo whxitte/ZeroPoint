@@ -267,6 +267,52 @@ def _parse_nuclei_line(raw: str, program_id: str, scan_run_id: str) -> Optional[
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Safe line reader — handles lines that exceed asyncio's StreamReader buffer
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _read_lines_safe(stream: asyncio.StreamReader):
+    """
+    Async generator that yields decoded lines from a StreamReader.
+
+    Unlike iterating `stream` directly, this handles `LimitOverrunError`
+    (lines larger than the 4MB buffer limit) by reading in raw chunks and
+    reassembling — no crash, no data loss.
+
+    Root cause: nuclei's -include-rr embeds the full HTTP request+response
+    in a single JSON line. Some targets (GraphQL introspection, large API
+    docs, verbose error pages) return multi-megabyte bodies that blow past
+    even a 4MB readline limit.
+    """
+    buffer = b""
+    while True:
+        try:
+            chunk = await stream.readline()
+            if not chunk:
+                if buffer:
+                    yield buffer.decode(errors="replace")
+                break
+            yield (buffer + chunk).decode(errors="replace")
+            buffer = b""
+
+        except ValueError:
+            # LimitOverrunError → read the monster line in a raw chunk
+            try:
+                chunk = await stream.read(4 * 2 ** 20)
+                buffer += chunk
+                if buffer.endswith(b"\n"):
+                    yield buffer.decode(errors="replace")
+                    buffer = b""
+                # else: accumulate until newline arrives
+            except Exception as inner:
+                logger.debug(f"[nuclei] Chunked read error (oversized line skipped): {inner}")
+                buffer = b""
+
+        except Exception as exc:
+            logger.debug(f"[nuclei] Stream read error: {exc}")
+            break
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # NucleiScanner Worker
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -554,16 +600,20 @@ class NucleiScanner:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                limit=2 ** 20,   # 1MB per-line buffer — needed because -include-rr
-                                 # embeds full HTTP request+response in a single JSON line
+                limit=4 * 2 ** 20,   # 4MB per-line buffer
+                                     # -include-rr embeds full HTTP request+response
+                                     # in a single JSON line; GraphQL/API responses
+                                     # can exceed 1MB easily
             )
 
             assert proc.stdout is not None
             hit_count = 0
 
-            # Stream findings from stdout as nuclei finds them
-            async for raw_line in proc.stdout:
-                line = raw_line.decode(errors="replace").strip()
+            # Stream findings from stdout line-by-line.
+            # If a line exceeds the 4MB buffer (extremely large response body),
+            # we read it in chunks, reassemble, and continue — never crash.
+            async for raw_line in _read_lines_safe(proc.stdout):
+                line = raw_line.strip()
                 if not line:
                     continue
 

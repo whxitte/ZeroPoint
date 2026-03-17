@@ -8,7 +8,7 @@ Imported by scanner.py — never call directly from other modules.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from loguru import logger
@@ -39,20 +39,28 @@ async def upsert_finding(finding: Finding) -> bool:
       Subsequent   → only last_seen updated; is_new preserved until notified
     """
     col = get_findings_col()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
+
+    # Build the $setOnInsert payload — explicitly exclude fields that are
+    # also in $set to avoid MongoDB error code 40 (path conflict).
+    # Rule: a field must appear in EITHER $set OR $setOnInsert, never both.
+    insert_fields = finding.model_dump(
+        exclude={"last_seen", "scan_run_id", "is_new"}
+    )
 
     try:
         result = await col.update_one(
             {"finding_id": finding.finding_id},
             {
+                # Always updated on every run (existing or new document)
                 "$set": {
                     "last_seen":   now,
                     "scan_run_id": finding.scan_run_id,
                 },
+                # Only set on first insert — never touched on subsequent runs
                 "$setOnInsert": {
-                    **finding.model_dump(exclude={"last_seen", "scan_run_id"}),
+                    **insert_fields,
                     "first_seen": now,
-                    "last_seen":  now,
                     "is_new":     True,
                 },
             },
@@ -115,7 +123,7 @@ async def get_assets_to_scan(
     level_order   = ["noise", "low", "medium", "high", "critical"]
     min_idx       = level_order.index(min_interest.lower())
     eligible_lvls = level_order[min_idx:]
-    cutoff        = datetime.utcnow() - timedelta(hours=rescan_after_hours)
+    cutoff        = datetime.now(timezone.utc) - timedelta(hours=rescan_after_hours)
 
     col   = get_assets_col()
     query = {
@@ -156,7 +164,7 @@ async def mark_asset_scanned(domain: str, scan_run_id: str) -> None:
     await col.update_one(
         {"domain": domain},
         {"$set": {
-            "last_scanned":  datetime.utcnow(),
+            "last_scanned":  datetime.now(timezone.utc),
             "last_scan_run": scan_run_id,
         }},
     )

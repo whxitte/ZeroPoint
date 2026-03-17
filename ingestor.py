@@ -34,7 +34,7 @@ import asyncio
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from loguru import logger
@@ -92,7 +92,7 @@ def configure_logging() -> None:
 class ProgramRunSummary:
     program_id:       str
     root_domain:      str
-    started_at:       datetime = field(default_factory=lambda: datetime.now(UTC))
+    started_at:       datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at:      Optional[datetime] = None
     total_discovered: int = 0
     net_new_count:    int = 0
@@ -101,7 +101,7 @@ class ProgramRunSummary:
     elapsed_seconds:  float = 0.0
 
     def finalise(self) -> None:
-        self.finished_at = datetime.now(UTC)
+        self.finished_at = datetime.now(timezone.utc)
         self.elapsed_seconds = (
             self.finished_at - self.started_at
         ).total_seconds()
@@ -122,14 +122,14 @@ class ProgramRunSummary:
 
 @dataclass
 class EngineRunSummary:
-    started_at:    datetime = field(default_factory=lambda: datetime.now(UTC))
+    started_at:    datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     program_count: int = 0
     total_new:     int = 0
     total_found:   int = 0
     failed_programs: List[str] = field(default_factory=list)
 
     def log(self) -> None:
-        elapsed = (datetime.now(UTC) - self.started_at).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - self.started_at).total_seconds()
         logger.info(
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"  ZeroPoint Run Complete\n"
@@ -202,7 +202,7 @@ async def ingest_program(
 
             except Exception as exc:
                 msg = f"Unhandled error processing {root_domain}: {exc}"
-                logger.exception(msg)
+                logger.error(msg)
                 summary.errors.append(msg)
 
         # Tally net-new assets

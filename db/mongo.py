@@ -10,48 +10,22 @@ Design contract:
   - Returns typed Pydantic models or primitives — never raw dicts.
 """
 
-import ssl
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import List, Optional
 
 import motor.motor_asyncio
 from loguru import logger
-from pymongo import ASCENDING, IndexModel, ssl_support
+from pymongo import ASCENDING, IndexModel
 from pymongo.errors import PyMongoError
 
 from config import settings
-from models import Asset, AssetStatus, Program, ProbeResult, ProbeStatus, ReconSource, UpsertResult
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# 🛠️ Python 3.13 + MongoDB Atlas TLS Patch
-# ---------------------------------------------------------------------------
-
-def _apply_atlas_tls_patch() -> None:
-    """
-    Monkey-patch PyMongo's SSL context creation to work with Python 3.13.
-
-    Python 3.13 + OpenSSL 3.x enforces strict TLS renegotiation which many Atlas
-    shard nodes (free tier) don't support, causing TLSV1_ALERT_INTERNAL_ERROR.
-    We inject OP_LEGACY_SERVER_CONNECT to allow the handshake to succeed.
-    """
-    orig_get_ssl_context = ssl_support.get_ssl_context
-
-    def patched_get_ssl_context(*args, **kwargs):
-        ctx = orig_get_ssl_context(*args, **kwargs)
-        legacy_flag = getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0)
-        if legacy_flag:
-            ctx.options |= legacy_flag
-        return ctx
-
-    # Apply globally across the entire pymongo package
-    ssl_support.get_ssl_context = patched_get_ssl_context
-
-_apply_atlas_tls_patch()
+from models import (
+    Asset, AssetStatus, Finding, Program,
+    ProbeResult, ProbeStatus, ReconSource,
+    ScanRun, ScanSeverity, UpsertResult,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -60,22 +34,16 @@ _apply_atlas_tls_patch()
 
 _client: Optional[motor.motor_asyncio.AsyncIOMotorClient] = None
 
+
 def _get_client() -> motor.motor_asyncio.AsyncIOMotorClient:
     """Lazy-initialise and return the shared Motor client (connection pool)."""
     global _client
     if _client is None:
-        # Standard connection — patch above handles the SSL context
         _client = motor.motor_asyncio.AsyncIOMotorClient(
             settings.MONGODB_URI,
             serverSelectionTimeoutMS=10_000,
             connectTimeoutMS=10_000,
             socketTimeoutMS=30_000,
-            maxPoolSize=10,       # keep well within Atlas free-tier limits
-            retryWrites=True,     # auto-retry transient write failures
-            retryReads=True,
-            tls=True,
-
-
         )
         logger.debug("Motor client initialised.")
     return _client
@@ -119,6 +87,26 @@ async def ensure_indexes() -> None:
         # Programs: unique on program_id
         await programs_col.create_indexes([
             IndexModel([("program_id", ASCENDING)], unique=True, name="program_id_unique"),
+        ])
+
+        # Findings collection
+        findings_col = get_db()["findings"]
+        await findings_col.create_indexes([
+            IndexModel([("finding_id", ASCENDING)],  unique=True, name="finding_id_unique"),
+            IndexModel([("program_id", ASCENDING)],  name="findings_program_id"),
+            IndexModel([("domain",     ASCENDING)],  name="findings_domain"),
+            IndexModel([("severity",   ASCENDING)],  name="findings_severity"),
+            IndexModel([("is_new",     ASCENDING)],  name="findings_is_new"),
+            IndexModel([("template_id",ASCENDING)],  name="findings_template_id"),
+            IndexModel([("first_seen", ASCENDING)],  name="findings_first_seen"),
+        ])
+
+        # Scan runs collection
+        scan_runs_col = get_db()["scan_runs"]
+        await scan_runs_col.create_indexes([
+            IndexModel([("run_id",     ASCENDING)],  unique=True, name="run_id_unique"),
+            IndexModel([("program_id", ASCENDING)],  name="scan_runs_program_id"),
+            IndexModel([("started_at", ASCENDING)],  name="scan_runs_started_at"),
         ])
 
         logger.info("MongoDB indexes verified / created.")
@@ -203,23 +191,20 @@ async def upsert_asset(
         # Always update on every run:
         "$set": {
             "last_seen":  now,
-            "status":     AssetStatus.ACTIVE.value,
             "program_id": program_id,
         },
         # Add source to set (no duplicates):
         "$addToSet": {
             "sources": source.value,
         },
-        # Only set these fields on the very first insertion.
-        # IMPORTANT: No field here may also appear in $set or $addToSet —
-        # MongoDB raises error 40 (path conflict) if the same path is
-        # referenced by more than one update operator.
+        # Only set these fields on the very first insertion:
         "$setOnInsert": {
-            "domain":       domain,
-            "first_seen":   now,
-            "is_new":       True,
-            "http_status":  None,
-            "http_title":   None,
+            "domain":      domain,
+            "first_seen":  now,
+            "is_new":      True,          # Stays True only for brand-new inserts
+            "status":      AssetStatus.NEW.value,
+            "http_status": None,
+            "http_title":  None,
             "technologies": [],
             "open_ports":   [],
             "extra":        {},
@@ -257,23 +242,18 @@ async def bulk_upsert_assets(
     domains: List[str],
     program_id: str,
     source: ReconSource,
-    concurrency: int = 50,
 ) -> List[UpsertResult]:
     """
     Upsert a list of domains concurrently using asyncio.gather.
-    Concurrency is bounded by a semaphore to avoid overwhelming the
-    MongoDB connection pool and causing SSL / pool-paused errors.
     Returns a list of UpsertResult for each domain.
     """
     import asyncio
 
-    semaphore = asyncio.Semaphore(concurrency)
-
-    async def _bounded(d: str) -> UpsertResult:
-        async with semaphore:
-            return await upsert_asset(domain=d, program_id=program_id, source=source)
-
-    tasks = [_bounded(d) for d in domains if d.strip()]
+    tasks = [
+        upsert_asset(domain=d, program_id=program_id, source=source)
+        for d in domains
+        if d.strip()
+    ]
 
     results: List[UpsertResult] = []
     raw = await asyncio.gather(*tasks, return_exceptions=True)
