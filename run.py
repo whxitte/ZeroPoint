@@ -198,12 +198,24 @@ async def run_probe(program_id: str, force: bool = False) -> ModuleResult:
     """Run Module 2 (Prober) for one program."""
     result = ModuleResult(module="probe", program_id=program_id)
     try:
-        from prober import probe_program, _build_prober
+        from prober import probe_program
+        from modules.prober import HttpxProber
 
         logger.info(f"[orchestrator] ▶ probe | program={program_id}")
 
-        prober = _build_prober()
-        stats  = await probe_program(
+        # Build the prober directly from settings — avoids depending on
+        # a private function (_build_prober) that may differ across versions
+        prober = HttpxProber(
+            binary_path      = settings.HTTPX_PATH,
+            threads          = settings.PROBER_THREADS,
+            rate_limit       = settings.PROBER_RATE_LIMIT,
+            timeout          = settings.PROBER_TIMEOUT,
+            retries          = settings.PROBER_RETRIES,
+            follow_redirects = settings.PROBER_FOLLOW_REDIRECTS,
+            screenshot       = settings.PROBER_SCREENSHOT,
+            screenshot_dir   = settings.PROBER_SCREENSHOT_DIR,
+        )
+        stats = await probe_program(
             program_id    = program_id,
             prober        = prober,
             force_reprobe = force,

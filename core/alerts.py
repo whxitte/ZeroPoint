@@ -14,7 +14,6 @@ Only fires when warranted — never spam, always signal.
 from __future__ import annotations
 
 import asyncio
-import html
 from typing import Dict, List
 
 import aiohttp
@@ -47,21 +46,14 @@ _INTEREST_EMOJI = {
 
 
 # ---------------------------------------------------------------------------
-# Transport helpers & Rate-Limiting
+# Transport helpers
 # ---------------------------------------------------------------------------
 
-_NOTIFY_SEMAPHORE: asyncio.Semaphore | None = None
-
-def _get_semaphore() -> asyncio.Semaphore:
-    """Lazy init semaphore to ensure it's in the correct loop."""
-    global _NOTIFY_SEMAPHORE
-    if _NOTIFY_SEMAPHORE is None:
-        _NOTIFY_SEMAPHORE = asyncio.Semaphore(settings.NOTIFICATIONS_CONCURRENCY)
-    return _NOTIFY_SEMAPHORE
-
-
 async def _send_discord_embed(title: str, description: str, color: int, fields: list | None = None) -> None:
-    """Post a single embed to the configured Discord webhook."""
+    """
+    Post a single embed to the configured Discord webhook.
+    Handles 429 rate-limit responses by respecting the retry_after value.
+    """
     if not settings.DISCORD_WEBHOOK_URL:
         return
 
@@ -76,72 +68,84 @@ async def _send_discord_embed(title: str, description: str, color: int, fields: 
 
     payload = {"embeds": [embed]}
 
-    async with _get_semaphore():
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     settings.DISCORD_WEBHOOK_URL,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
-                    if resp.status not in (200, 204):
-                        body = await resp.text()
-                        logger.warning(f"Discord webhook returned {resp.status}: {body[:200]}")
+                    if resp.status in (200, 204):
+                        return  # success
+
+                    if resp.status == 429:
+                        # Discord rate limit — read retry_after and sleep exactly that long
+                        try:
+                            data        = await resp.json()
+                            retry_after = float(data.get("retry_after", 1.0))
+                        except Exception:
+                            retry_after = 1.0
+                        logger.debug(
+                            f"[discord] Rate limited (429) — sleeping {retry_after:.1f}s "
+                            f"(attempt {attempt + 1}/{max_retries})"
+                        )
+                        await asyncio.sleep(retry_after + 0.1)
+                        continue  # retry
+
+                    body = await resp.text()
+                    logger.warning(f"[discord] HTTP {resp.status}: {body[:200]}")
+                    return  # don't retry non-429 errors
+
         except aiohttp.ClientError as exc:
-            logger.error(f"Discord notification failed: {repr(exc)}")
+            logger.error(f"[discord] Request failed: {exc}")
+            return
         except Exception as exc:
-            logger.error(f"Unexpected Discord error: {repr(exc)}")
+            logger.error(f"[discord] Unexpected error: {exc}")
+            return
 
 
 async def _send_telegram_message(text: str) -> None:
-    """Send an HTML-formatted message via Telegram Bot API."""
+    """
+    Send an HTML-formatted message via Telegram Bot API.
+    Retries once on timeout.
+    """
     if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
         return
 
-    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
+    url     = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id":    settings.TELEGRAM_CHAT_ID,
         "text":       text,
         "parse_mode": "HTML",
     }
 
-    async with _get_semaphore():
-        for attempt in range(settings.TELEGRAM_MAX_RETRIES + 1):
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        url,
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp:
-                        if resp.status == 200:
-                            return
-                        
-                        body = await resp.text()
-                        if resp.status == 429:
-                            # Parse retry_after from Telegram JSON
-                            try:
-                                data = await resp.json()
-                                wait = data.get("parameters", {}).get("retry_after", 3)
-                            except:
-                                wait = 5
-                            logger.warning(f"Telegram 429: Rate limited. Retrying after {wait}s (attempt {attempt+1})")
-                            await asyncio.sleep(wait)
-                            continue
-                        
-                        logger.warning(f"Telegram API returned {resp.status}: {body[:200]}")
-                        break # Other errors don't retry
-
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                if attempt < settings.TELEGRAM_MAX_RETRIES:
-                    wait = (settings.TELEGRAM_RETRY_AFTER_MS / 1000) * (2 ** attempt)
-                    logger.warning(f"Telegram transport error: {repr(exc)}. Retrying in {wait}s...")
-                    await asyncio.sleep(wait)
-                else:
-                    logger.error(f"Telegram notification failed after retries: {repr(exc)}")
-            except Exception as exc:
-                logger.error(f"Unexpected Telegram error: {repr(exc)}")
-                break
+    for attempt in range(2):  # one retry on timeout
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status == 200:
+                        return
+                    body = await resp.text()
+                    logger.warning(f"[telegram] HTTP {resp.status}: {body[:200]}")
+                    return
+        except asyncio.TimeoutError:
+            if attempt == 0:
+                logger.warning(f"[telegram] Timeout on attempt 1, retrying...")
+                await asyncio.sleep(1.0)
+                continue
+            logger.warning(f"[telegram] Timeout on attempt 2, giving up")
+        except aiohttp.ClientError as exc:
+            logger.error(f"[telegram] Request failed: {exc}")
+            return
+        except Exception as exc:
+            logger.error(f"[telegram] Unexpected error: {exc}")
+            return
 
 
 async def _dispatch(discord_coro, telegram_coro) -> None:
@@ -149,7 +153,7 @@ async def _dispatch(discord_coro, telegram_coro) -> None:
     results = await asyncio.gather(discord_coro, telegram_coro, return_exceptions=True)
     for r in results:
         if isinstance(r, Exception):
-            logger.error(f"[alerts] Dispatch exception: {repr(r)}")
+            logger.error(f"[alerts] Dispatch exception: {r}")
 
 
 # ---------------------------------------------------------------------------
@@ -178,30 +182,21 @@ async def notify_new_assets(results: List[UpsertResult]) -> None:
         if count > 20:
             domain_list += f"\n…and {count - 20} more."
 
-        telegram_domain_list = "\n".join(
-            f"• <code>{html.escape(a.domain)}</code> [{html.escape(a.source.value)}]" for a in assets[:20]
-        )
-        if count > 20:
-            telegram_domain_list += f"\n…and {count - 20} more."
-
-
-
         await _dispatch(
             _send_discord_embed(
                 title=f"🔍  {count} New Asset{'s' if count > 1 else ''} — {program_id}",
-                description=domain_list, # Discord can handle unformatted backticks
+                description=domain_list.replace("`", ""),
                 color=_COLOR["new_asset"],
             ),
             _send_telegram_message(
                 f"<b>🔍 ZeroPoint — New Assets</b>\n"
                 f"Program: <code>{program_id}</code>\n"
                 f"New: <b>{count}</b>\n\n"
-                + telegram_domain_list
+                + domain_list.replace("`", "<code>", 1).replace("`", "</code>")
             ),
         )
 
         logger.info(f"[alerts] Notified {count} new asset(s) for {program_id}")
-
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +295,7 @@ async def notify_probe_summary(
         ),
         _send_telegram_message(tg_summary),
     )
+
 
 # ---------------------------------------------------------------------------
 # Module 3: Vulnerability finding notifications
@@ -433,6 +429,7 @@ async def notify_scan_summary(
         _send_telegram_message(tg_body),
     )
     logger.info(f"[alerts] Scan summary sent | program={program_id} new={new_findings}")
+
 
 # ---------------------------------------------------------------------------
 # Module 4: Crawler — secret and endpoint alert dispatchers
