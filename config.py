@@ -147,6 +147,24 @@ class Settings(BaseSettings):
         description="Minimum interest_level to qualify for scanning: high or critical",
     )
 
+    # ── Orchestrator / Daemon (Module 5) settings ────────────────────────────
+    DAEMON_INGEST_INTERVAL: int = Field(
+        default=3600,
+        description="Seconds between ingestion runs in daemon mode (default: 1h)",
+    )
+    DAEMON_PROBE_INTERVAL:  int = Field(
+        default=7200,
+        description="Seconds between probe runs in daemon mode (default: 2h)",
+    )
+    DAEMON_SCAN_INTERVAL:   int = Field(
+        default=21600,
+        description="Seconds between scan runs in daemon mode (default: 6h)",
+    )
+    DAEMON_CRAWL_INTERVAL:  int = Field(
+        default=43200,
+        description="Seconds between crawl runs in daemon mode (default: 12h)",
+    )
+
     # ── Concurrency & Rate-Limiting ──────────────────────────────────────────
     MAX_CONCURRENT_PROGRAMS: int   = Field(default=3)
     MAX_CONCURRENT_TOOLS:    int   = Field(default=3)
@@ -165,6 +183,24 @@ class Settings(BaseSettings):
     LOG_FILE:     str  = Field(default="logs/zeropoint.log")
     LOG_ROTATION: str  = Field(default="50 MB")
     LOG_RETENTION: str = Field(default="14 days")
+
+    # ── Daemon / Orchestrator (Module 5) settings ─────────────────────────────
+    DAEMON_INGEST_INTERVAL: int = Field(
+        default=3600,
+        description="Seconds between ingestion runs in daemon mode (default: 1h)",
+    )
+    DAEMON_PROBE_INTERVAL:  int = Field(
+        default=7200,
+        description="Seconds between probe runs in daemon mode (default: 2h)",
+    )
+    DAEMON_SCAN_INTERVAL:   int = Field(
+        default=21600,
+        description="Seconds between scanner runs in daemon mode (default: 6h)",
+    )
+    DAEMON_CRAWL_INTERVAL:  int = Field(
+        default=43200,
+        description="Seconds between crawler runs in daemon mode (default: 12h)",
+    )
 
 
 @lru_cache(maxsize=1)

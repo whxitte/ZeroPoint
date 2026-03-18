@@ -233,8 +233,8 @@ zeropoint/
 
 ## Quick reference
 
-| Intent | Command | 
-|--------|--------|------------------------------------------|
+| Intent | Command |
+|--------|---------|
 | Run all active programs	      | python3 ingestor.py |
 | Run a specific program	      | python3 ingestor.py --program-id <program-id> |
 | Seed a new program	      | python3 ingestor.py --seed-program <program-name> |
@@ -284,8 +284,8 @@ zeropoint/
 │    • Writes http_status, tech_stack, title, cdn back to DB      │
 │    • Fires alert for CRITICAL/HIGH interest assets              │
 │                                                                 │
-│  MongoDB writes:  assets.probe_status, assets.interest_level   │
-│  Alert trigger:   interest_level = CRITICAL or HIGH            │
+│  MongoDB writes:  assets.probe_status, assets.interest_level    │
+│  Alert trigger:   interest_level = CRITICAL or HIGH             │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
                                ▼
@@ -348,18 +348,18 @@ crontab -e
 ```
 # ── Module 1 ──────────────────────────────────────────────────
 python3 ingestor.py                              # all active programs
-python3 ingestor.py --program-id shopify_h1     # single program
+python3 ingestor.py --program-id shopify_h1      # single program
 python3 ingestor.py --domain shopify.com --program-id shopify_h1  # single domain
 
 # ── Module 2 ──────────────────────────────────────────────────
 python3 prober.py                               # all active programs
-python3 prober.py --program-id shopify_h1      # single program
+python3 prober.py --program-id shopify_h1       # single program
 python3 prober.py --force                       # re-probe even recently probed assets
 python3 prober.py --domain api.shopify.com      # quick single-domain probe (no DB write)
 
 # ── Module 3 ──────────────────────────────────────────────────
 python3 scanner.py                              # all active programs
-python3 scanner.py --program-id shopify_h1     # single program
+python3 scanner.py --program-id shopify_h1      # single program
 python3 scanner.py --force                      # ignore 72h rescan interval
 python3 scanner.py --severity critical,high     # tighten severity filter for this run
 python3 scanner.py --domain target.com          # quick test, no DB write, still alerts
@@ -369,4 +369,52 @@ python3 crawler.py --domain example.com             # Quick test on one domain (
 python3 crawler.py --program-id shopify_h1          # Crawl a specific program
 python3 crawler.py --program-id shopify_h1 --force  # Force re-crawl (ignore 48h interval)
 python3 crawler.py                                  # All programs
+
+# ── Module 5 ──────────────────────────────────────────────────
+
+python3 run.py --program-id shopify_h1                          # Full pipeline for one program (all 4 modules in sequence)
+python3 run.py                                                  # Full pipeline for ALL programs in DB
+python3 run.py --program-id shopify_h1 --modules ingest,probe   # Specific modules only
+python3 run.py --program-id shopify_h1 --skip scan,crawl        # Skip modules
+python3 run.py --program-id shopify_h1 --force                  # Force re-run (ignore all intervals)
+python3 run.py --program-id shopify_h1 --severity critical,high # Override Nuclei severity for this run
+python3 run.py --program-id shopify_h1 --dry-run                # Preview without executing
+python3 run.py --program-id shopify_h1 --stop-on-error          # Abort pipeline if any module fails
+
+```
+
+## Daemon mode — 24/7 autonomous monitoring:
+```bash
+# Start daemon (all programs, all modules on schedule)
+python3 run.py --daemon
+
+# Daemon for one program only
+python3 run.py --daemon --program-id shopify_h1
+
+# Daemon with custom intervals
+python3 run.py --daemon --ingest-interval 1800 --scan-interval 3600
+
+# Ctrl+C or SIGTERM shuts down cleanly after current module finishes
+```
+
+### How the daemon schedules modules
+
+Each module runs on its own independent timer — a slow crawl never delays the next ingestion:
+```
+Time 0h:   ingest ▶ probe ▶ scan ▶ crawl   ← all run immediately on startup
+Time 1h:   ingest ▶ probe                   ← ingest interval hit
+Time 2h:   ingest ▶ probe                   ← both hit
+Time 6h:   ingest ▶ probe ▶ scan            ← scan interval hit
+Time 12h:  ingest ▶ probe ▶ scan ▶ crawl   ← all hit again
+```
+
+New subdomain discovered at hour 1 → probed at hour 2 → scanned at hour 6 → crawled at hour 12. Maximum time from discovery to first vuln scan: **6 hours**. On a first-come-first-served bug bounty program, that's your competitive edge.
+
+### Full 5-module system — everything you have
+```
+Module 1  ingestor.py  — find subdomains (Subfinder + crt.sh + Shodan)
+Module 2  prober.py    — HTTP probe + fingerprint (httpx)
+Module 3  scanner.py   — vuln scan (Nuclei)
+Module 4  crawler.py   — endpoint discovery + JS secrets (Katana + waybackurls)
+Module 5  run.py       — orchestrates all four, manual + daemon mode
 ```
