@@ -23,7 +23,13 @@ import time
 from typing import Any, Dict, List, Optional
 
 import aiohttp
-import shodan
+import warnings
+# Shodan SDK imports requests, which emits a noisy  
+# about urllib3/charset_normalizer version mismatches on Python 3.13.
+# This is harmless — suppress it at the import boundary.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    import shodan
 from loguru import logger
 from pydantic import ValidationError
 
@@ -184,11 +190,12 @@ async def run_crtsh(root_domain: str) -> ReconResult:
     domains: List[str] = []
     url = _CRTSH_URL.format(domain=root_domain)
 
+    logger.info(f"[crt.sh] Querying CT logs for {root_domain}")
+
+    connector = aiohttp.TCPConnector(ssl=True, limit=5)
     timeout = aiohttp.ClientTimeout(total=settings.CRTSH_TIMEOUT)
 
     for attempt in range(1, settings.CRTSH_RETRIES + 1):
-        # Create connector inside the loop to ensure a fresh one for each attempt
-        connector = aiohttp.TCPConnector(ssl=True, limit=5)
         try:
             async with aiohttp.ClientSession(
                 connector=connector,
@@ -196,10 +203,10 @@ async def run_crtsh(root_domain: str) -> ReconResult:
                 timeout=timeout,
             ) as session:
                 async with session.get(url) as resp:
-                    if resp.status == 429 or resp.status == 404 or resp.status == 503: # Added 503
+                    if resp.status == 429:
                         wait = 2 ** attempt
                         logger.warning(
-                            f"[crt.sh] Rate limited, 404, or 503 error (attempt {attempt}), "
+                            f"[crt.sh] Rate limited (attempt {attempt}), "
                             f"backing off {wait}s …"
                         )
                         await asyncio.sleep(wait)
@@ -225,8 +232,8 @@ async def run_crtsh(root_domain: str) -> ReconResult:
 
             break  # success — exit retry loop
 
-        except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError) as exc:
-            msg = f"[crt.sh] Network error or timeout (attempt {attempt}): {repr(exc)}"
+        except aiohttp.ClientError as exc:
+            msg = f"[crt.sh] Network error (attempt {attempt}): {exc}"
             logger.warning(msg)
             errors.append(msg)
             await asyncio.sleep(2 ** attempt)
@@ -236,9 +243,6 @@ async def run_crtsh(root_domain: str) -> ReconResult:
             logger.error(msg)
             errors.append(msg)
             break
-        finally:
-            # Ensure connector is always closed
-            await connector.close()
 
     domains = _deduplicate(domains)
     # Filter to only subdomains of the root domain
@@ -340,26 +344,13 @@ async def discover_subdomains(root_domain: str) -> List[ReconResult]:
         run_subfinder(root_domain),
         run_crtsh(root_domain),
         run_shodan(root_domain),
-        return_exceptions=True,  # Return exceptions as results for graceful handling
+        return_exceptions=False,  # ReconResult.errors handles failures gracefully
     )
 
-    processed_results: List[ReconResult] = []
-    for result in results:
-        if isinstance(result, Exception):
-            err_msg = repr(result)
-            logger.error(f"[Recon] Tool failed for {root_domain}: {err_msg}")
-            # Create a placeholder ReconResult to represent the failed tool
-            # The specific source is unknown here, so we might need a more
-            # sophisticated way to map exceptions back to their origin.
-            # For now, we'll log it as a generic recon error.
-            processed_results.append(ReconResult(source=ReconSource.UNKNOWN, domains=[], errors=[err_msg]))
-        else:
-            processed_results.append(result)
-    
-    total = sum(len(r.domains) for r in processed_results)
+    total = sum(len(r.domains) for r in results)  # type: ignore[union-attr]
     elapsed = time.monotonic() - start
     logger.info(
         f"[Recon] Discovery complete for {root_domain} — "
         f"{total} total raw subdomains across all sources in {elapsed:.1f}s"
     )
-    return processed_results
+    return list(results)  # type: ignore[arg-type]
