@@ -418,3 +418,27 @@ Module 3  scanner.py   — vuln scan (Nuclei)
 Module 4  crawler.py   — endpoint discovery + JS secrets (Katana + waybackurls)
 Module 5  run.py       — orchestrates all four, manual + daemon mode
 ```
+---
+### What you have right now
+A fully autonomous bug bounty pipeline that:
+
+- Discovers subdomains every hour
+- Fingerprints and classifies every asset
+- Runs targeted Nuclei scans on HIGH/CRITICAL assets every 6 hours
+- Crawls endpoints and extracts JS secrets every 12 hours
+- Alerts you on Discord and Telegram the moment anything new is found
+- Never alerts twice for the same finding (SHA-256 dedup across all modules)
+- Runs 24/7 with a single command: python3 run.py --daemon
+---
+### daily workflow from here
+```bash
+# Start the 24/7 daemon — this is all you need
+python3 run.py --daemon
+
+# When you see an alert — manually investigate that specific asset
+python3 scanner.py --domain flagged-asset.example.com --severity critical,high
+
+# Add a new program
+python3 ingestor.py --seed-program newprogram.com --program-id newprog_h1
+python3 run.py --program-id newprog_h1  # immediate full pipeline run
+```
