@@ -240,6 +240,12 @@ def scan_content_for_secrets(
             if not value or len(value) < 4:
                 continue
 
+            # Skip values that are plain URLs — a URL is not a secret.
+            # Patterns like generic_api_key can match JS variables whose
+            # *value* happens to be a URL (e.g. apiUrl = "https://...").
+            if value.startswith(("http://", "https://", "//", "ws://", "wss://")):
+                continue
+
             # Apply entropy filter — skip obviously low-entropy placeholders
             effective_min = max(pattern_min_entropy, min_entropy) if pattern_min_entropy > 0 else 0
             if effective_min > 0 and shannon_entropy(value) < effective_min:

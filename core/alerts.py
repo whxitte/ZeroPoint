@@ -4,9 +4,14 @@ ZeroPoint :: core/alerts.py
 Notification dispatcher for all ZeroPoint pipeline events.
 
 Alert types:
-  1. notify_new_assets()      — New subdomains from ingestion (Module 1)
-  2. notify_high_value_probe()— CRITICAL/HIGH interest assets from prober (Module 2)
-  3. notify_probe_summary()   — End-of-run stats digest
+  1. notify_new_assets()          — New subdomains from ingestion (Module 1)
+  2. notify_high_value_probe()    — CRITICAL/HIGH interest assets from prober (Module 2)
+  3. notify_probe_summary()       — End-of-run probe stats digest
+  4. notify_finding()             — New Nuclei vulnerability finding (Module 3)
+  5. notify_scan_summary()        — End-of-scan stats digest
+  6. notify_secret()              — New JS secret discovered (Module 4)
+  7. notify_interesting_endpoint()— New interesting endpoint found
+  8. notify_crawl_summary()       — End-of-crawl stats digest
 
 Only fires when warranted — never spam, always signal.
 """
@@ -14,6 +19,7 @@ Only fires when warranted — never spam, always signal.
 from __future__ import annotations
 
 import asyncio
+import html as _html
 from typing import Dict, List
 
 import aiohttp
@@ -21,6 +27,15 @@ from loguru import logger
 
 from config import settings
 from models import InterestLevel, ProbeResult, UpsertResult
+
+
+def _e(text: str) -> str:
+    """
+    Escape a string for safe embedding in Telegram HTML messages.
+    Telegram HTML only supports <b>, <i>, <code>, <pre>, <a>.
+    Any literal < > & in content must be escaped or Telegram returns 400.
+    """
+    return _html.escape(str(text), quote=False)
 
 
 # ---------------------------------------------------------------------------
@@ -109,43 +124,77 @@ async def _send_discord_embed(title: str, description: str, color: int, fields: 
 async def _send_telegram_message(text: str) -> None:
     """
     Send an HTML-formatted message via Telegram Bot API.
-    Retries once on timeout.
+    Handles:
+      - 429 Too Many Requests → reads retry_after, sleeps, retries up to 3 times
+      - 400 Bad Request       → falls back to plain-text (no parse_mode)
+      - Timeout               → one retry
     """
     if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
         return
 
-    url     = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id":    settings.TELEGRAM_CHAT_ID,
-        "text":       text,
-        "parse_mode": "HTML",
-    }
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    for attempt in range(2):  # one retry on timeout
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    if resp.status == 200:
-                        return
-                    body = await resp.text()
-                    logger.warning(f"[telegram] HTTP {resp.status}: {body[:200]}")
-                    return
-        except asyncio.TimeoutError:
-            if attempt == 0:
-                logger.warning(f"[telegram] Timeout on attempt 1, retrying...")
-                await asyncio.sleep(1.0)
-                continue
-            logger.warning(f"[telegram] Timeout on attempt 2, giving up")
-        except aiohttp.ClientError as exc:
-            logger.error(f"[telegram] Request failed: {exc}")
-            return
-        except Exception as exc:
-            logger.error(f"[telegram] Unexpected error: {exc}")
-            return
+    async def _post(parse_mode: str) -> bool:
+        """Returns True on success."""
+        payload = {
+            "chat_id":    settings.TELEGRAM_CHAT_ID,
+            "text":       text,
+            "parse_mode": parse_mode,
+        }
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        url,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as resp:
+                        if resp.status == 200:
+                            return True
+
+                        body_text = await resp.text()
+
+                        if resp.status == 429:
+                            # Rate limited — read retry_after and sleep
+                            try:
+                                data        = await resp.json(content_type=None)
+                                retry_after = float(
+                                    data.get("parameters", {}).get("retry_after", 3)
+                                )
+                            except Exception:
+                                retry_after = 3.0
+                            logger.debug(
+                                f"[telegram] 429 — sleeping {retry_after:.1f}s "
+                                f"(attempt {attempt + 1}/3)"
+                            )
+                            await asyncio.sleep(retry_after + 0.5)
+                            continue
+
+                        logger.warning(f"[telegram] HTTP {resp.status}: {body_text[:200]}")
+                        return False
+
+            except asyncio.TimeoutError:
+                if attempt < 2:
+                    await asyncio.sleep(1.0)
+                    continue
+                logger.warning("[telegram] Timed out after 3 attempts")
+                return False
+            except aiohttp.ClientError as exc:
+                logger.error(f"[telegram] Request failed: {exc}")
+                return False
+            except Exception as exc:
+                logger.error(f"[telegram] Unexpected error: {exc}")
+                return False
+
+        return False
+
+    # Try HTML first, fall back to plain text on parse error (400)
+    success = await _post("HTML")
+    if not success:
+        # Strip HTML tags and retry as plain text
+        import re
+        plain = re.sub(r"<[^>]+>", "", text)
+        await _post("")
 
 
 async def _dispatch(discord_coro, telegram_coro) -> None:
@@ -169,31 +218,39 @@ async def notify_new_assets(results: List[UpsertResult]) -> None:
     if not new_assets:
         return
 
-    # Group by program for clean per-program messages
     by_program: Dict[str, List[UpsertResult]] = {}
     for r in new_assets:
         by_program.setdefault(r.program_id, []).append(r)
 
     for program_id, assets in by_program.items():
-        count       = len(assets)
-        domain_list = "\n".join(
-            f"• `{a.domain}` [{a.source.value}]" for a in assets[:20]
+        count = len(assets)
+
+        # Discord — plain text domain list (no markdown needed)
+        discord_list = "\n".join(
+            f"• {a.domain} [{a.source.value}]" for a in assets[:20]
         )
         if count > 20:
-            domain_list += f"\n…and {count - 20} more."
+            discord_list += f"\n…and {count - 20} more."
+
+        # Telegram — HTML with proper escaping on every dynamic value
+        tg_lines = [
+            f"<b>🔍 ZeroPoint — New Assets</b>",
+            f"Program: <code>{_e(program_id)}</code>",
+            f"New: <b>{count}</b>",
+            "",
+        ]
+        for a in assets[:20]:
+            tg_lines.append(f"• <code>{_e(a.domain)}</code> [{_e(a.source.value)}]")
+        if count > 20:
+            tg_lines.append(f"…and {count - 20} more.")
 
         await _dispatch(
             _send_discord_embed(
                 title=f"🔍  {count} New Asset{'s' if count > 1 else ''} — {program_id}",
-                description=domain_list.replace("`", ""),
+                description=discord_list,
                 color=_COLOR["new_asset"],
             ),
-            _send_telegram_message(
-                f"<b>🔍 ZeroPoint — New Assets</b>\n"
-                f"Program: <code>{program_id}</code>\n"
-                f"New: <b>{count}</b>\n\n"
-                + domain_list.replace("`", "<code>", 1).replace("`", "</code>")
-            ),
+            _send_telegram_message("\n".join(tg_lines)),
         )
 
         logger.info(f"[alerts] Notified {count} new asset(s) for {program_id}")
@@ -237,16 +294,16 @@ async def notify_high_value_probe(probe: ProbeResult, program_id: str) -> None:
 
     # ── Telegram message (concise, actionable) ────────────────────────────
     tg_lines = [
-        f"<b>{emoji} ZeroPoint — {level.value.upper()} Target</b>",
+        f"<b>{emoji} ZeroPoint — {_e(level.value.upper())} Target</b>",
         f"",
-        f"<b>Domain:</b>  <code>{probe.domain}</code>",
-        f"<b>Program:</b> <code>{program_id}</code>",
+        f"<b>Domain:</b>  <code>{_e(probe.domain)}</code>",
+        f"<b>Program:</b> <code>{_e(program_id)}</code>",
         f"<b>Status:</b>  <code>{probe.http_status or 'N/A'}</code>",
-        f"<b>Tech:</b>    {tech}",
-        f"<b>Why:</b>     {reasons}",
+        f"<b>Tech:</b>    {_e(tech)}",
+        f"<b>Why:</b>     {_e(reasons)}",
     ]
     if probe.http_title:
-        tg_lines.append(f"<b>Title:</b>   {probe.http_title[:100]}")
+        tg_lines.append(f"<b>Title:</b>   {_e(probe.http_title[:100])}")
 
     telegram_task = _send_telegram_message("\n".join(tg_lines))
 
@@ -365,18 +422,18 @@ async def notify_finding(finding, program_id: str) -> None:
 
     # ── Telegram: concise but complete ────────────────────────────────────
     tg_lines = [
-        f"<b>{emoji} ZeroPoint — {sev.upper()} Finding</b>",
+        f"<b>{emoji} ZeroPoint — {_e(sev.upper())} Finding</b>",
         f"",
-        f"<b>Template:</b>  <code>{finding.template_id}</code>",
-        f"<b>Name:</b>      {finding.template_name}",
-        f"<b>Domain:</b>    <code>{finding.domain}</code>",
-        f"<b>Program:</b>   <code>{program_id}</code>",
-        f"<b>Matched:</b>   {finding.matched_at[:100]}",
+        f"<b>Template:</b>  <code>{_e(finding.template_id)}</code>",
+        f"<b>Name:</b>      {_e(finding.template_name)}",
+        f"<b>Domain:</b>    <code>{_e(finding.domain)}</code>",
+        f"<b>Program:</b>   <code>{_e(program_id)}</code>",
+        f"<b>Matched:</b>   {_e(finding.matched_at[:100])}",
     ]
     if finding.description:
-        tg_lines.append(f"<b>Desc:</b>      {finding.description[:200]}")
+        tg_lines.append(f"<b>Desc:</b>      {_e(finding.description[:200])}")
     if finding.reference:
-        tg_lines.append(f"<b>Ref:</b>       {finding.reference[0][:100]}")
+        tg_lines.append(f"<b>Ref:</b>       {_e(finding.reference[0][:100])}")
 
     telegram_coro = _send_telegram_message("\n".join(tg_lines))
 
@@ -486,12 +543,12 @@ async def notify_secret(secret, program_id: str) -> None:
     tg_lines = [
         f"<b>{emoji} ZeroPoint — SECRET FOUND</b>",
         f"",
-        f"<b>Type:</b>     <code>{secret.secret_type}</code>",
-        f"<b>Severity:</b> <code>{sev.upper()}</code>",
-        f"<b>Domain:</b>   <code>{secret.domain}</code>",
-        f"<b>Program:</b>  <code>{program_id}</code>",
-        f"<b>URL:</b>      {secret.source_url[:100]}",
-        f"<b>Value:</b>    <code>{safe_val}</code>",
+        f"<b>Type:</b>     <code>{_e(secret.secret_type)}</code>",
+        f"<b>Severity:</b> <code>{_e(sev.upper())}</code>",
+        f"<b>Domain:</b>   <code>{_e(secret.domain)}</code>",
+        f"<b>Program:</b>  <code>{_e(program_id)}</code>",
+        f"<b>URL:</b>      {_e(secret.source_url[:100])}",
+        f"<b>Value:</b>    <code>{_e(safe_val)}</code>",
     ]
 
     await _dispatch(discord_coro, _send_telegram_message("\n".join(tg_lines)))

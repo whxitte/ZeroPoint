@@ -264,23 +264,45 @@ async def probe_single_domain(domain: str) -> None:
     )
     logger.info(f"[prober] Single-domain probe: {domain}")
 
+    result = None
     async for raw in prober.probe([domain]):
-        classified = classifier.classify(raw)
+        result = classifier.classify(raw)
+        break   # take first result, close generator cleanly (avoids "cancelled" warning)
+
+    if result:
+        rt = f"{result.response_time_ms}ms" if result.response_time_ms is not None else "—"
         logger.info(
             f"\n"
-            f"  Domain:        {classified.domain}\n"
-            f"  Status:        {classified.http_status}\n"
-            f"  Title:         {classified.http_title}\n"
-            f"  Tech:          {classified.technologies}\n"
-            f"  Interest:      {classified.interest_level.value.upper()}\n"
-            f"  Reasons:       {classified.interest_reasons}\n"
-            f"  Server:        {classified.web_server}\n"
-            f"  CDN:           {classified.cdn_provider}\n"
-            f"  Response time: {classified.response_time_ms}ms\n"
+            f"  Domain:        {result.domain}\n"
+            f"  Status:        {result.http_status}\n"
+            f"  Title:         {result.http_title}\n"
+            f"  Tech:          {result.technologies}\n"
+            f"  Interest:      {result.interest_level.value.upper()}\n"
+            f"  Reasons:       {result.interest_reasons}\n"
+            f"  Server:        {result.web_server}\n"
+            f"  CDN:           {result.cdn_provider}\n"
+            f"  Response time: {rt}\n"
         )
-        return
+    else:
+        logger.warning(f"[prober] No response from {domain}")
 
-    logger.warning(f"[prober] No response from {domain}")
+
+def _build_prober() -> HttpxProber:
+    """
+    Factory — builds an HttpxProber from current settings.
+    Exposed so the orchestrator (run.py) can import and reuse it
+    without duplicating the settings wiring.
+    """
+    return HttpxProber(
+        binary_path      = settings.HTTPX_PATH,
+        threads          = settings.PROBER_THREADS,
+        rate_limit       = settings.PROBER_RATE_LIMIT,
+        timeout          = settings.PROBER_TIMEOUT,
+        retries          = settings.PROBER_RETRIES,
+        follow_redirects = settings.PROBER_FOLLOW_REDIRECTS,
+        screenshot       = settings.PROBER_SCREENSHOT,
+        screenshot_dir   = settings.PROBER_SCREENSHOT_DIR,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
