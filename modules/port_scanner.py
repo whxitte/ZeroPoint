@@ -159,6 +159,30 @@ def classify_port(
     return PortFindingSeverity.INFO, f"Open port {port}"
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Port range expander
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _expand_port_ranges(ports_str: str) -> List[int]:
+    """
+    Expand a comma-separated port spec with ranges into a flat list.
+    "21-23,80,443,6379" → [21, 22, 23, 80, 443, 6379]
+    """
+    result = []
+    for part in ports_str.split(","):
+        part = part.strip()
+        if "-" in part:
+            try:
+                start, end = part.split("-", 1)
+                result.extend(range(int(start.strip()), int(end.strip()) + 1))
+            except ValueError:
+                pass
+        elif part.isdigit():
+            result.append(int(part))
+    return result
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Masscan phase
 # ─────────────────────────────────────────────────────────────────────────────
@@ -202,6 +226,7 @@ async def _run_masscan(
     logger.debug(f"[masscan] CMD: {' '.join(cmd)}")
 
     results: Dict[str, List[int]] = {}
+    perm_error = False
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -211,11 +236,28 @@ async def _run_masscan(
         )
         _, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=300)
         stderr = stderr_bytes.decode(errors="replace").strip()
+
+        # Detect permission / capability errors — masscan needs raw sockets
         if stderr:
-            logger.debug(f"[masscan] stderr: {stderr[-300:]}")
+            stderr_lower = stderr.lower()
+            if any(kw in stderr_lower for kw in (
+                "permission denied", "operation not permitted",
+                "failed to detect", "cap_net_raw", "rawsock",
+                "cannot open rawsock", "must be run as root",
+            )):
+                logger.warning(
+                    "[masscan] ⚠️  Permission denied — masscan needs raw socket access.\n"
+                    "  Fix (pick one):\n"
+                    "    Option A (recommended): sudo setcap cap_net_raw+ep $(which masscan)\n"
+                    "    Option B: run the scanner with sudo\n"
+                    "  Auto-falling back to Nmap-only mode for this run."
+                )
+                perm_error = True
+            else:
+                logger.debug(f"[masscan] stderr: {stderr[-300:]}")
 
         # Parse JSON output
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 10:
+        if not perm_error and os.path.exists(output_path) and os.path.getsize(output_path) > 10:
             with open(output_path, encoding="utf-8", errors="replace") as fh:
                 raw = fh.read().strip()
                 # masscan JSON is a list but may have a trailing comma making it invalid
@@ -236,7 +278,8 @@ async def _run_masscan(
                 except json.JSONDecodeError as exc:
                     logger.warning(f"[masscan] JSON parse error: {exc}")
 
-        logger.info(f"[masscan] Found {len(results)} hosts with open ports")
+        if not perm_error:
+            logger.info(f"[masscan] Found {len(results)} hosts with open ports")
 
     except FileNotFoundError:
         logger.error(
@@ -258,7 +301,7 @@ async def _run_masscan(
             except OSError:
                 pass
 
-    return results
+    return results, perm_error
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -447,23 +490,30 @@ class PortScanner:
         import shutil
         use_masscan = shutil.which(self.masscan_binary) is not None
 
+        masscan_perm_error = False
+
         if use_masscan:
             logger.info(f"[portscan] Phase 1: Masscan @ {self.masscan_rate} pps")
-            open_ports_by_ip = await _run_masscan(
+            open_ports_by_ip, masscan_perm_error = await _run_masscan(
                 all_ips, self.ports, self.masscan_rate, self.masscan_binary
             )
         else:
             logger.warning(
                 f"[portscan] masscan not found at '{self.masscan_binary}' — "
                 "falling back to Nmap-only mode (slower). "
-                "Install masscan for faster scanning."
+                "Install: sudo apt install masscan"
             )
-            # Nmap-only mode: scan every IP directly
-            open_ports_by_ip = {ip: [] for ip in all_ips}  # empty → nmap does discovery
+            open_ports_by_ip = {}
 
-        if not open_ports_by_ip and use_masscan:
-            logger.info("[portscan] Masscan found no open ports")
-            return
+        # If masscan returned nothing due to permission error, fall back to Nmap-only
+        if masscan_perm_error or (use_masscan and not open_ports_by_ip):
+            if not masscan_perm_error:
+                logger.info("[portscan] Masscan found no open ports — skipping Nmap phase")
+                return
+            # Permission error → fall back to Nmap-only (slower but works without root)
+            logger.info("[portscan] Falling back to Nmap-only mode — scanning all ports directly")
+            use_masscan = False
+            open_ports_by_ip = {ip: [] for ip in all_ips}
 
         # Phase 2 — Nmap per host (service fingerprint)
         if self.skip_nmap:
@@ -490,12 +540,12 @@ class PortScanner:
         for ip, discovered_ports in open_ports_by_ip.items():
             domain = ip_to_domain.get(ip, ip)
 
-            # In Nmap-only mode, scan the default port list; otherwise use masscan results
-            ports_to_scan = discovered_ports if use_masscan and discovered_ports else [
-                int(p) for p in self.ports.replace(",", " ")
-                .replace("-", " ").split()
-                if p.isdigit()
-            ]
+            # In Nmap-only mode, expand the port list (handles ranges like "80,443,6379-6381")
+            # In masscan mode, use the discovered open ports directly
+            if use_masscan and discovered_ports:
+                ports_to_scan = discovered_ports
+            else:
+                ports_to_scan = _expand_port_ranges(self.ports)
 
             services = await _run_nmap(ip, ports_to_scan, self.nmap_binary, self.nmap_timeout)
 

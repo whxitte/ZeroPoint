@@ -247,10 +247,11 @@ class GoogleDorker:
         max_results: int   = 10,    # per query (max 10 for free tier)
         rate_delay:  float = 1.1,   # seconds between requests (≤10 req/s)
     ) -> None:
-        self.api_key     = api_key
-        self.cse_id      = cse_id
-        self.max_results = min(max(1, max_results), 10)
-        self.rate_delay  = rate_delay
+        self.api_key       = api_key
+        self.cse_id        = cse_id
+        self.max_results   = min(max(1, max_results), 10)
+        self.rate_delay    = rate_delay
+        self._api_disabled = False   # set True on fatal 403 to abort remaining queries
 
     async def _search(
         self,
@@ -258,6 +259,9 @@ class GoogleDorker:
         query:   str,
     ) -> List[dict]:
         """Execute one Google Custom Search query. Returns list of result items."""
+        if self._api_disabled:
+            return []
+
         params = {
             "key": self.api_key,
             "cx":  self.cse_id,
@@ -277,15 +281,33 @@ class GoogleDorker:
 
                 if resp.status == 429:
                     logger.warning(
-                        f"[dork] Google API rate limited (429) on query: {query[:60]}\n"
-                        "  You may have exceeded the daily quota (100 free queries/day)."
+                        f"[dork] Google API rate limited (429) — "
+                        "daily quota (100 queries/day) likely exhausted. Stopping."
                     )
-                    await asyncio.sleep(30)
+                    self._api_disabled = True
                     return []
 
                 if resp.status == 403:
                     body = await resp.json()
                     err  = body.get("error", {}).get("message", "unknown")
+
+                    # Detect "API not enabled" — fatal, no point retrying any query
+                    if "does not have the access" in err or "not enabled" in err.lower():
+                        logger.error(
+                            f"[dork] ❌ Google Custom Search API not enabled on this project.\n"
+                            f"\n"
+                            f"  How to fix (2 minutes):\n"
+                            f"  1. Go to: https://console.cloud.google.com/apis/library\n"
+                            f"  2. Search: \'Custom Search API\'\n"
+                            f"  3. Click the result → click \'Enable\'\n"
+                            f"  4. Wait ~1 minute for it to activate, then retry.\n"
+                            f"\n"
+                            f"  Note: Make sure you\'re in the SAME Google Cloud project\n"
+                            f"  that owns the API key in your .env."
+                        )
+                        self._api_disabled = True
+                        return []
+
                     logger.warning(f"[dork] Google API 403: {err}")
                     return []
 
@@ -317,6 +339,8 @@ class GoogleDorker:
         connector = aiohttp.TCPConnector(ssl=True, limit=3)
         async with aiohttp.ClientSession(connector=connector) as session:
             for query_template, category, severity, reason in DORK_TEMPLATES:
+                if self._api_disabled:
+                    break   # fatal API error — stop remaining queries
                 query = query_template.replace("{domain}", domain)
 
                 await asyncio.sleep(self.rate_delay)
