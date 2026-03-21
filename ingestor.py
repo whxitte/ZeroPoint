@@ -166,10 +166,12 @@ async def ingest_program(
     )
 
     async with semaphore:
+        logger.info(f"{'━' * 60}")
         logger.info(
-            f"[Ingestor] ▶ Starting program: {program.program_id} "
-            f"({len(program.domains)} root domain(s))"
+            f"  Ingestor | program={program.program_id} "
+            f"| domains={len(program.domains)}"
         )
+        logger.info(f"{'━' * 60}")
 
         all_upsert_results: List[UpsertResult] = []
 
@@ -201,7 +203,7 @@ async def ingest_program(
                     all_upsert_results.extend(upsert_results)
 
             except Exception as exc:
-                msg = f"Unhandled error processing {root_domain}: {exc}"
+                msg = f"Unhandled error processing {root_domain}: {repr(exc)}"
                 logger.error(msg)
                 summary.errors.append(msg)
 

@@ -351,6 +351,14 @@ async def run_pipeline(
             logger.info(f"[orchestrator] DRY-RUN: would run {MODULE_LABELS[module_name]}")
             continue
 
+        # ── Module start banner ───────────────────────────────────────────
+        logger.info(
+            f"\n{'━' * 62}\n"
+            f"  ▶  {MODULE_LABELS[module_name]}\n"
+            f"  program={program_id} | force={force}\n"
+            f"{'━' * 62}"
+        )
+
         # Call the appropriate runner
         if module_name == "scan":
             result = await MODULE_RUNNERS[module_name](program_id, force=force, severity=severity)
@@ -360,13 +368,21 @@ async def run_pipeline(
         pipeline.modules_run.append(result)
 
         elapsed = f"{result.elapsed_seconds:.1f}s"
+
+        # ── Module end banner ─────────────────────────────────────────────
         if result.success:
             logger.success(
-                f"[orchestrator] ✓ {module_name} | {elapsed} | stats={result.stats}"
+                f"\n{'━' * 62}\n"
+                f"  ✓  {MODULE_LABELS[module_name]} complete\n"
+                f"  elapsed={elapsed} | stats={result.stats}\n"
+                f"{'━' * 62}"
             )
         else:
             logger.error(
-                f"[orchestrator] ✗ {module_name} FAILED | {elapsed} | {result.error}"
+                f"\n{'━' * 62}\n"
+                f"  ✗  {MODULE_LABELS[module_name]} FAILED\n"
+                f"  elapsed={elapsed} | error={result.error}\n"
+                f"{'━' * 62}"
             )
             if stop_on_error:
                 logger.warning(f"[orchestrator] stop_on_error=True — aborting pipeline")
