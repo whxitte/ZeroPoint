@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 import warnings
-# Shodan SDK imports requests, which emits a noisy  
+# Shodan SDK imports requests, which emits a noisy RequestsDependencyWarning
 # about urllib3/charset_normalizer version mismatches on Python 3.13.
 # This is harmless — suppress it at the import boundary.
 with warnings.catch_warnings():
@@ -192,10 +192,12 @@ async def run_crtsh(root_domain: str) -> ReconResult:
 
     logger.info(f"[crt.sh] Querying CT logs for {root_domain}")
 
-    connector = aiohttp.TCPConnector(ssl=True, limit=5)
     timeout = aiohttp.ClientTimeout(total=settings.CRTSH_TIMEOUT)
 
     for attempt in range(1, settings.CRTSH_RETRIES + 1):
+        # Create a fresh connector per attempt — reusing a closed connector
+        # from a previous attempt causes "Session is closed" RuntimeError.
+        connector = aiohttp.TCPConnector(ssl=True, limit=5)
         try:
             async with aiohttp.ClientSession(
                 connector=connector,
@@ -208,6 +210,17 @@ async def run_crtsh(root_domain: str) -> ReconResult:
                         logger.warning(
                             f"[crt.sh] Rate limited (attempt {attempt}), "
                             f"backing off {wait}s …"
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+
+                    if resp.status >= 500:
+                        # crt.sh is a free service — 5xx means temporary
+                        # overload. Retry with fixed 10s delay before giving up.
+                        wait = 10
+                        logger.warning(
+                            f"[crt.sh] HTTP {resp.status} (attempt {attempt}/{settings.CRTSH_RETRIES}), "
+                            f"retrying in {wait}s …"
                         )
                         await asyncio.sleep(wait)
                         continue
@@ -234,6 +247,12 @@ async def run_crtsh(root_domain: str) -> ReconResult:
 
         except aiohttp.ClientError as exc:
             msg = f"[crt.sh] Network error (attempt {attempt}): {exc}"
+            logger.warning(msg)
+            errors.append(msg)
+            await asyncio.sleep(2 ** attempt)
+
+        except asyncio.TimeoutError:
+            msg = f"[crt.sh] Timed out after {settings.CRTSH_TIMEOUT}s (attempt {attempt})"
             logger.warning(msg)
             errors.append(msg)
             await asyncio.sleep(2 ** attempt)
@@ -284,7 +303,12 @@ async def run_shodan(root_domain: str) -> ReconResult:
 
     try:
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _blocking_shodan_query)
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, _blocking_shodan_query),
+            timeout=60,   # Shodan API should respond within 60s — if not, bail out
+                          # Note: the thread still runs to completion internally;
+                          # this just prevents the event loop from waiting forever.
+        )
 
         subdomains: List[str] = result.get("subdomains", [])
         domain_data: List[Dict] = result.get("data", [])
@@ -316,6 +340,11 @@ async def run_shodan(root_domain: str) -> ReconResult:
         logger.error(msg)
         errors.append(msg)
 
+    except asyncio.TimeoutError:
+        msg = f"[Shodan] Timed out after 60s for {root_domain} — skipping"
+        logger.warning(msg)
+        errors.append(msg)
+
     except Exception as exc:
         msg = f"[Shodan] Unexpected error: {exc}"
         logger.error(msg)
@@ -335,22 +364,39 @@ async def discover_subdomains(root_domain: str) -> List[ReconResult]:
     Fire all recon workers concurrently via asyncio.gather.
     Even if one worker crashes, the others continue — errors are in the result.
 
+    Uses return_exceptions=True so a crt.sh timeout or Shodan API failure
+    never cancels the other running tools. Each tool always runs to completion.
+
     Returns a list of ReconResult, one per tool.
     """
     logger.info(f"[Recon] Starting full discovery for: {root_domain}")
     start = time.monotonic()
 
-    results = await asyncio.gather(
+    raw = await asyncio.gather(
         run_subfinder(root_domain),
         run_crtsh(root_domain),
         run_shodan(root_domain),
-        return_exceptions=False,  # ReconResult.errors handles failures gracefully
+        return_exceptions=True,   # NEVER cancel other tools on partial failure
     )
 
-    total = sum(len(r.domains) for r in results)  # type: ignore[union-attr]
+    results: List[ReconResult] = []
+    for item in raw:
+        if isinstance(item, Exception):
+            # Tool raised an unhandled exception — wrap it so the pipeline continues
+            err_msg = f"Tool raised unexpected exception: {repr(item)}"
+            logger.error(f"[Recon] {err_msg} (domain={root_domain})")
+            results.append(ReconResult(
+                source  = ReconSource.UNKNOWN,
+                domains = [],
+                errors  = [err_msg],
+            ))
+        else:
+            results.append(item)
+
+    total = sum(len(r.domains) for r in results)
     elapsed = time.monotonic() - start
     logger.info(
         f"[Recon] Discovery complete for {root_domain} — "
         f"{total} total raw subdomains across all sources in {elapsed:.1f}s"
     )
-    return list(results)  # type: ignore[arg-type]
+    return results

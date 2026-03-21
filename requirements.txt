@@ -22,6 +22,7 @@ loguru>=0.7.2            # Structured, colourised logging with rotation
 fastapi>=0.110.0                  # Async web framework for the REST API
 uvicorn[standard]>=0.29.0         # ASGI server to run FastAPI
 python-jose[cryptography]>=3.3.0  # JWT token creation and validation
+slowapi>=0.1.9                    # Rate limiting for FastAPI (wraps limits library)
 
 # ── Dev / Testing (optional) ─────────────────────────────────────────────────
 # pytest>=7.4.0

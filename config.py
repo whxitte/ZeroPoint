@@ -85,10 +85,42 @@ class Settings(BaseSettings):
     KATANA_PATH:         str = Field(default="katana")
     WAYBACKURLS_PATH:    str = Field(default="waybackurls")
     GAU_PATH:            str = Field(default="gau")
+    MASSCAN_PATH:        str = Field(default="masscan",  description="Masscan binary path")
+    NMAP_PATH:           str = Field(default="nmap",     description="Nmap binary path")
     SECRETFINDER_PATH:   str = Field(
         default="",
         description="Full path to SecretFinder.py (e.g. /opt/SecretFinder/SecretFinder.py)",
     )
+
+    # ── Port Scanner (Module 7) settings ─────────────────────────────────────
+    PORTSCAN_PORTS:    str  = Field(
+        default=(
+            "21-23,25,53,80,443,445,1433,1521,2181,2375-2376,2379-2380,"
+            "3000,3306,3389,4243,4369,5044,5050,5432,5601,5984,"
+            "6379,6443,7077,8080,8125,8161,8443,8888,9000,9090,9092,"
+            "9200,9300,9443,10250,10255,11211,15672,27017-27018"
+        ),
+        description="Comma-separated port ranges for Masscan/Nmap",
+    )
+    MASSCAN_RATE:      int  = Field(
+        default=1000,
+        description="Masscan packets/sec. Keep ≤1000 for stealth. Max ~10000 on fast links.",
+    )
+    NMAP_TIMEOUT:      int  = Field(
+        default=120,
+        description="Seconds per host for Nmap service fingerprint",
+    )
+    DAEMON_PORTSCAN_INTERVAL: int = Field(
+        default=86400,
+        description="Seconds between port scan runs in daemon mode (default: 24h)",
+    )
+
+    # u2500u2500 Google Dork Engine (Module 8) settings u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500
+    GOOGLE_API_KEY:          Optional[str] = Field(default=None, description="Google Cloud API key with Custom Search API enabled")
+    GOOGLE_CSE_ID:           Optional[str] = Field(default=None, description="Google Custom Search Engine ID (cx parameter)")
+    GOOGLE_DORK_MAX_RESULTS: int   = Field(default=10, description="Results per dork query (max 10 for Google CSE free tier)")
+    GOOGLE_DORK_RATE_DELAY:  float = Field(default=1.1, description="Seconds between Google API requests (free tier: <=10 req/s)")
+    DAEMON_DORK_INTERVAL:    int   = Field(default=86400, description="Seconds between dork runs in daemon mode (default: 24h)")
 
     # ── Crawler (Module 4) settings ──────────────────────────────────────────
     CRAWLER_DEPTH:           int  = Field(default=3,    description="Katana crawl depth")
@@ -199,40 +231,22 @@ class Settings(BaseSettings):
     )
 
     # ── Concurrency & Rate-Limiting ──────────────────────────────────────────
-    MAX_CONCURRENT_PROGRAMS: int   = Field(default=3)
-    MAX_CONCURRENT_TOOLS:    int   = Field(default=3)
-    NOTIFICATIONS_CONCURRENCY: int = Field(default=5, description="Max simultaneous alert messages")
-    TELEGRAM_MAX_RETRIES:    int   = Field(default=3)
-    TELEGRAM_RETRY_AFTER_MS: int = Field(default=1000)
-    SUBFINDER_TIMEOUT:       int   = Field(default=300, description="Seconds")
-    CRTSH_TIMEOUT:           int   = Field(default=30)
-    CRTSH_RETRIES:           int   = Field(default=3)
-    RATE_LIMIT_MIN_JITTER:   float = Field(default=0.5, description="Seconds")
-    RATE_LIMIT_MAX_JITTER:   float = Field(default=2.5, description="Seconds")
+    MAX_CONCURRENT_PROGRAMS:   int   = Field(default=3)
+    MAX_CONCURRENT_TOOLS:      int   = Field(default=3)
+    NOTIFICATIONS_CONCURRENCY: int   = Field(default=5, description="Max simultaneous alert HTTP connections")
+    TELEGRAM_MAX_RETRIES:      int   = Field(default=3)
+    TELEGRAM_RETRY_AFTER_MS:   int   = Field(default=1000)
+    SUBFINDER_TIMEOUT:         int   = Field(default=300, description="Seconds")
+    CRTSH_TIMEOUT:             int   = Field(default=120)
+    CRTSH_RETRIES:             int   = Field(default=3)
+    RATE_LIMIT_MIN_JITTER:     float = Field(default=0.5, description="Seconds")
+    RATE_LIMIT_MAX_JITTER:     float = Field(default=2.5, description="Seconds")
 
     # ── Logging ──────────────────────────────────────────────────────────────
     LOG_LEVEL:    str  = Field(default="INFO")
     LOG_FILE:     str  = Field(default="logs/zeropoint.log")
     LOG_ROTATION: str  = Field(default="50 MB")
     LOG_RETENTION: str = Field(default="14 days")
-
-    # ── Daemon / Orchestrator (Module 5) settings ─────────────────────────────
-    DAEMON_INGEST_INTERVAL: int = Field(
-        default=3600,
-        description="Seconds between ingestion runs in daemon mode (default: 1h)",
-    )
-    DAEMON_PROBE_INTERVAL:  int = Field(
-        default=7200,
-        description="Seconds between probe runs in daemon mode (default: 2h)",
-    )
-    DAEMON_SCAN_INTERVAL:   int = Field(
-        default=21600,
-        description="Seconds between scanner runs in daemon mode (default: 6h)",
-    )
-    DAEMON_CRAWL_INTERVAL:  int = Field(
-        default=43200,
-        description="Seconds between crawler runs in daemon mode (default: 12h)",
-    )
 
 
 @lru_cache(maxsize=1)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from api.auth import get_current_tenant
+from api.deps import verify_program_ownership
 from db.mongo import get_db
 
 router = APIRouter(prefix="/leaks", tags=["github-leaks"])
@@ -10,13 +11,13 @@ router = APIRouter(prefix="/leaks", tags=["github-leaks"])
 
 @router.get("/", summary="List GitHub leaked credentials for a program")
 async def list_leaks(
-    program_id: str,
-    severity:   Optional[str] = None,
-    match_type: Optional[str] = None,
+    severity:   Optional[str]  = None,
+    match_type: Optional[str]  = None,
     is_new:     Optional[bool] = None,
-    limit:      int = Query(default=50, le=500),
-    skip:       int = 0,
-    tenant_id:  str = Depends(get_current_tenant),
+    limit:      int  = Query(default=50, le=500),
+    skip:       int  = 0,
+    program_id: str  = Depends(verify_program_ownership),
+    tenant_id:  str  = Depends(get_current_tenant),
 ):
     col   = get_db()["github_leaks"]
     query = {"program_id": program_id, "tenant_id": tenant_id}
@@ -39,7 +40,7 @@ async def list_leaks(
 
 @router.get("/stats", summary="GitHub leak statistics for a program")
 async def leak_stats(
-    program_id: str,
+    program_id: str = Depends(verify_program_ownership),
     tenant_id:  str = Depends(get_current_tenant),
 ):
     col      = get_db()["github_leaks"]

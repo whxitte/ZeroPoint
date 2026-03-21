@@ -121,7 +121,7 @@ async def scan_program(
             tenant_id  = tenant_id,
         ):
             run.results_raw += 1
-            run.queries_run  = 1  # incremented per query in scanner
+            run.queries_run += 1
 
             try:
                 is_new = await upsert_leak(leak)

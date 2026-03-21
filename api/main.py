@@ -43,9 +43,13 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from loguru import logger
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 import db.mongo as mongo_ops
 from config import settings
@@ -54,6 +58,19 @@ from db.github_ops import ensure_github_indexes
 from db.scanner_ops import ensure_scanner_indexes
 
 from api.routes import auth, programs, assets, findings, leaks
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rate limiter
+# ─────────────────────────────────────────────────────────────────────────────
+# Limits requests per IP address. Protects against scraping and hammering.
+# Default: 120 requests/minute per IP across all endpoints.
+# Auth endpoint is tighter: 10 requests/minute (brute-force protection).
+#
+# To decorate a route: @limiter.limit("10/minute")
+# The limiter is attached to app.state so it's accessible in route handlers.
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -120,6 +137,10 @@ app = FastAPI(
     redoc_url   = "/api/redoc",
     openapi_url = "/api/openapi.json",
 )
+
+# Rate limiter state — must be attached before middleware
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS — allow the dashboard frontend
 app.add_middleware(

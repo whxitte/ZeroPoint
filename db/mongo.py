@@ -82,11 +82,16 @@ async def ensure_indexes() -> None:
             IndexModel([("first_seen", ASCENDING)],            name="first_seen"),
             IndexModel([("last_seen", ASCENDING)],             name="last_seen"),
             IndexModel([("status", ASCENDING)],                name="status"),
+            # tenant_id indexes — needed for every API query that filters by tenant
+            IndexModel([("tenant_id", ASCENDING)],             name="asset_tenant_id"),
+            IndexModel([("tenant_id", ASCENDING), ("program_id", ASCENDING)],
+                       name="asset_tenant_program"),
         ])
 
         # Programs: unique on program_id
         await programs_col.create_indexes([
             IndexModel([("program_id", ASCENDING)], unique=True, name="program_id_unique"),
+            IndexModel([("tenant_id", ASCENDING)],             name="program_tenant_id"),
         ])
 
         # Findings collection
@@ -99,6 +104,9 @@ async def ensure_indexes() -> None:
             IndexModel([("is_new",     ASCENDING)],  name="findings_is_new"),
             IndexModel([("template_id",ASCENDING)],  name="findings_template_id"),
             IndexModel([("first_seen", ASCENDING)],  name="findings_first_seen"),
+            IndexModel([("tenant_id",  ASCENDING)],  name="finding_tenant_id"),
+            IndexModel([("tenant_id", ASCENDING), ("program_id", ASCENDING)],
+                       name="finding_tenant_program"),
         ])
 
         # Scan runs collection
@@ -192,7 +200,11 @@ async def upsert_asset(
         "$set": {
             "last_seen":  now,
             "status":     AssetStatus.ACTIVE.value,
-            "is_new":     False,          # will be overridden by $setOnInsert if new
+            # is_new is intentionally NOT here — it must only appear in
+            # $setOnInsert. Having it in both $set and $setOnInsert causes
+            # MongoDB error code 40 (path conflict) on upsert.
+            # Existing docs keep their is_new value; new inserts get True
+            # from $setOnInsert below.
             "program_id": program_id,
         },
         # Add source to set (no duplicates):
@@ -201,12 +213,15 @@ async def upsert_asset(
         },
         # Only set these fields on the very first insertion:
         "$setOnInsert": {
-            "domain":      domain,
-            "first_seen":  now,
-            "is_new":      True,          # Stays True only for brand-new inserts
-            "status":      AssetStatus.NEW.value,
-            "http_status": None,
-            "http_title":  None,
+            "domain":       domain,
+            "first_seen":   now,
+            "is_new":       True,   # Stays True only for brand-new inserts
+            # status is intentionally NOT here — it lives only in $set above.
+            # Having the same field in both $set and $setOnInsert causes
+            # MongoDB error code 40 (path conflict). is_new=True is the real
+            # newness indicator; status=ACTIVE from $set is correct for all docs.
+            "http_status":  None,
+            "http_title":   None,
             "technologies": [],
             "open_ports":   [],
             "extra":        {},
