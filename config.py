@@ -116,6 +116,8 @@ class Settings(BaseSettings):
     )
 
     # u2500u2500 Google Dork Engine (Module 8) settings u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500
+    BRAVE_SEARCH_API_KEY:    Optional[str] = Field(default=None, description="Brave Search API key — https://api.search.brave.com/app/dashboard")
+    SERPAPI_KEY:             Optional[str] = Field(default=None, description="SerpAPI key — 100 free searches/month, no card — https://serpapi.com")
     GOOGLE_API_KEY:          Optional[str] = Field(default=None, description="Google Cloud API key with Custom Search API enabled")
     GOOGLE_CSE_ID:           Optional[str] = Field(default=None, description="Google Custom Search Engine ID (cx parameter)")
     GOOGLE_DORK_MAX_RESULTS: int   = Field(default=10, description="Results per dork query (max 10 for Google CSE free tier)")

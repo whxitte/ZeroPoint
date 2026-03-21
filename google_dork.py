@@ -62,7 +62,7 @@ from db.dork_ops import (
     upsert_dork_result,
 )
 from models import DorkScanRun, DorkSeverity
-from modules.dorker import GoogleDorker
+from modules.dorker import build_dorker
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -222,19 +222,15 @@ async def dork_all_programs(dorker: GoogleDorker) -> List[DorkScanRun]:
 
 async def dork_single_domain(domain: str) -> None:
     """Dev/debug — dork one domain, print results, no DB write."""
-    if not settings.GOOGLE_API_KEY or not settings.GOOGLE_CSE_ID:
+    dorker = _build_dorker()
+    if not dorker:
         logger.error(
-            "[dork] GOOGLE_API_KEY and GOOGLE_CSE_ID not configured.\n"
-            "  Setup guide:\n"
-            "  1. https://console.cloud.google.com → Custom Search API → API key\n"
-            "  2. https://cse.google.com/cse/ → Create engine (search entire web)\n"
-            "  3. Add to .env:\n"
-            "       GOOGLE_API_KEY=AIzaSy...\n"
-            "       GOOGLE_CSE_ID=abc123..."
+            "[dork] No search API key configured. Add one of:\n"
+            "  BRAVE_SEARCH_API_KEY=BSA...  (recommended)\n"
+            "    Get key: https://api.search.brave.com/app/dashboard\n"
+            "  OR  GOOGLE_API_KEY=AIza... + GOOGLE_CSE_ID=abc..."
         )
         return
-
-    dorker = _build_dorker()
 
     print(f"\n  {'━' * 56}")
     print(f"  Google Dork: {domain}")
@@ -260,10 +256,13 @@ async def dork_single_domain(domain: str) -> None:
         print(f"  Total: {count} result(s) found")
 
 
-def _build_dorker() -> GoogleDorker:
-    return GoogleDorker(
-        api_key     = settings.GOOGLE_API_KEY or "",
-        cse_id      = settings.GOOGLE_CSE_ID  or "",
+def _build_dorker():
+    """Auto-select backend: Brave → SerpAPI → Google (whichever key is set)."""
+    return build_dorker(
+        brave_key   = settings.BRAVE_SEARCH_API_KEY,
+        serpapi_key = settings.SERPAPI_KEY,
+        google_key  = settings.GOOGLE_API_KEY,
+        google_cse  = settings.GOOGLE_CSE_ID,
         max_results = settings.GOOGLE_DORK_MAX_RESULTS,
         rate_delay  = settings.GOOGLE_DORK_RATE_DELAY,
     )
@@ -283,11 +282,22 @@ async def main(
     logger.info("  ZeroPoint Google Dork Engine — Module 8 Starting")
     logger.info("=" * 60)
 
-    if not settings.GOOGLE_API_KEY or not settings.GOOGLE_CSE_ID:
+    dorker = _build_dorker()
+    if not dorker:
         logger.error(
-            "[dork] GOOGLE_API_KEY and GOOGLE_CSE_ID are required.\n"
-            "  See https://developers.google.com/custom-search/v1/overview\n"
-            "  Add both to your .env file."
+            "[dork] No search API key configured. Add ONE to .env:\n"
+            "\n"
+            "  Option A — SerpAPI (100 free/month, NO credit card):\n"
+            "    SERPAPI_KEY=...\n"
+            "    Sign up: https://serpapi.com/users/sign_up\n"
+            "\n"
+            "  Option B — Brave Search ($5 free credits/month, needs card):\n"
+            "    BRAVE_SEARCH_API_KEY=BSA...\n"
+            "    Sign up: https://api.search.brave.com/app/dashboard\n"
+            "\n"
+            "  Option C — Google Custom Search (100 free/day, needs billing linked):\n"
+            "    GOOGLE_API_KEY=AIza... + GOOGLE_CSE_ID=abc...\n"
+            "    Billing fix: console.cloud.google.com/billing"
         )
         sys.exit(1)
 
@@ -297,8 +307,6 @@ async def main(
 
     await mongo_ops.ensure_indexes()
     await ensure_dork_indexes()
-
-    dorker = _build_dorker()
 
     try:
         if program_id:

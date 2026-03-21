@@ -394,6 +394,11 @@ sudo apt install masscan nmap
 # 1. console.cloud.google.com → Custom Search API → API key
 # 2. cse.google.com/cse → create engine (search entire web) → get cx ID
 # Add to .env:
+# For brave mode
+# 1. Go to: https://api.search.brave.com/app/dashboard https://brave.com/search/api/
+# 2. Sign up (free) → Add Subscription → Free tier
+# 3. Copy the API key
+
 GOOGLE_API_KEY=AIzaSy...
 GOOGLE_CSE_ID=abc123...
 
@@ -487,3 +492,15 @@ python3 serve.py                  # http://localhost:8000/api/docs
 python3 serve.py --reload         # dev mode with hot-reload
 python3 serve.py --port 9000      # custom port
 ```
+
+### All modules till now
+
+- Module 1 — Ingestion (Subfinder + crt.sh + Shodan)
+- Module 2 — Prober (httpx fingerprinting + interest classification)
+- Module 3 — Scanner (Nuclei targeted vuln scan)
+- Module 4 — Crawler (Katana + Wayback + GAU + JS secret analysis)
+- Module 5 — Orchestrator (manual + 24/7 daemon, all 8 modules)
+- Module 6 — GitHub OSINT (credential leak detection)
+- Module 7 — Port Scanner (Masscan + Nmap)
+- Module 8 — Google Dork Engine (SerpAPI/Brave/Google)
+- SaaS API (FastAPI + JWT + multi-tenant)
