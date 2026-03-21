@@ -442,3 +442,14 @@ python3 scanner.py --domain flagged-asset.example.com --severity critical,high
 python3 ingestor.py --seed-program newprogram.com --program-id newprog_h1
 python3 run.py --program-id newprog_h1  # immediate full pipeline run
 ```
+
+---
+
+### SaaS Archetecture
+
+serve.py — New file. Launches the REST API server:
+```bash
+python3 serve.py                  # http://localhost:8000/api/docs
+python3 serve.py --reload         # dev mode with hot-reload
+python3 serve.py --port 9000      # custom port
+```

@@ -39,10 +39,39 @@ class Settings(BaseSettings):
 
     # ── API Keys ─────────────────────────────────────────────────────────────
     SHODAN_API_KEY:   Optional[str] = Field(default=None, description="Shodan API key")
-    GITHUB_TOKEN:     Optional[str] = Field(default=None, description="For Subfinder sources")
+    GITHUB_TOKEN:     Optional[str] = Field(default=None, description="GitHub PAT — used by Subfinder AND GitHub OSINT module")
     VIRUSTOTAL_KEY:   Optional[str] = Field(default=None)
     CENSYS_ID:        Optional[str] = Field(default=None)
     CENSYS_SECRET:    Optional[str] = Field(default=None)
+
+    # ── GitHub OSINT (Module 6) ──────────────────────────────────────────────
+    GITHUB_OSINT_ENABLED:     bool  = Field(default=True)
+    GITHUB_OSINT_INTERVAL:    int   = Field(
+        default=21600,
+        description="Seconds between GitHub OSINT runs in daemon mode (default: 6h)",
+    )
+    GITHUB_OSINT_MAX_RESULTS: int   = Field(
+        default=30,
+        description="Max GitHub search results per query (1-100). "
+                    "Lower = faster, higher = more coverage.",
+    )
+    GITHUB_OSINT_RATE_DELAY:  float = Field(
+        default=2.5,
+        description="Seconds to sleep between GitHub API calls (rate limit: 30 req/min auth)",
+    )
+
+    # ── API Server settings ──────────────────────────────────────────────────
+    API_HOST:          str  = Field(default="0.0.0.0")
+    API_PORT:          int  = Field(default=8000)
+    API_SECRET_KEY:    str  = Field(
+        default="change-me-in-production",
+        description="JWT signing secret — MUST be changed before exposing to network",
+    )
+    API_TOKEN_EXPIRE_MINUTES: int = Field(default=1440, description="JWT TTL in minutes (default: 24h)")
+    API_CORS_ORIGINS:  str  = Field(
+        default="http://localhost:3000",
+        description="Comma-separated allowed CORS origins for the dashboard",
+    )
 
     # ── Notifications ────────────────────────────────────────────────────────
     DISCORD_WEBHOOK_URL:  Optional[str] = Field(default=None)
@@ -164,6 +193,10 @@ class Settings(BaseSettings):
         default=43200,
         description="Seconds between crawl runs in daemon mode (default: 12h)",
     )
+    DAEMON_GITHUB_INTERVAL: int = Field(
+        default=21600,
+        description="Seconds between GitHub OSINT runs in daemon mode (default: 6h)",
+    )
 
     # ── Concurrency & Rate-Limiting ──────────────────────────────────────────
     MAX_CONCURRENT_PROGRAMS: int   = Field(default=3)
@@ -171,7 +204,6 @@ class Settings(BaseSettings):
     NOTIFICATIONS_CONCURRENCY: int = Field(default=5, description="Max simultaneous alert messages")
     TELEGRAM_MAX_RETRIES:    int   = Field(default=3)
     TELEGRAM_RETRY_AFTER_MS: int = Field(default=1000)
-
     SUBFINDER_TIMEOUT:       int   = Field(default=300, description="Seconds")
     CRTSH_TIMEOUT:           int   = Field(default=30)
     CRTSH_RETRIES:           int   = Field(default=3)

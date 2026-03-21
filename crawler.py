@@ -178,10 +178,14 @@ async def crawl_asset(
     stats["interesting"] = len(interesting_new)
 
     # ── 3. Alert on new interesting endpoints ────────────────────────────
-    alert_tasks = []
-    for ep in interesting_new:
-        alert_tasks.append(notify_interesting_endpoint(ep, prog_id))
-    if alert_tasks:
+    # Only alert on endpoints that were just inserted (is_new=True after upsert).
+    # bulk_upsert_endpoints returns the new count but not which ones — we approximate
+    # by only alerting on is_interesting endpoints from the current batch.
+    # The notification semaphore in alerts.py caps concurrent connections to
+    # NOTIFICATIONS_CONCURRENCY (default 5), preventing "Too many open files".
+    if alert_tasks := [
+        notify_interesting_endpoint(ep, prog_id) for ep in interesting_new
+    ]:
         await asyncio.gather(*alert_tasks, return_exceptions=True)
 
     # ── 4. JS analysis — run concurrently (semaphore-limited) ────────────

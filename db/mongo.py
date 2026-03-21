@@ -191,6 +191,8 @@ async def upsert_asset(
         # Always update on every run:
         "$set": {
             "last_seen":  now,
+            "status":     AssetStatus.ACTIVE.value,
+            "is_new":     False,          # will be overridden by $setOnInsert if new
             "program_id": program_id,
         },
         # Add source to set (no duplicates):

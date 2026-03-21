@@ -137,6 +137,23 @@ pytest tests/test_crawler.py -v
 
 ---
 
+## Test Github 
+
+```bash
+# Add to .env first:
+GITHUB_TOKEN=ghp_your_token_here   # needs public_repo scope
+
+# Quick test — no DB write, prints results live:
+python3 github_osint.py --domain shopify.com
+
+# Run through the orchestrator as Module 6:
+python3 run.py --program-id shopify_h1 --modules github
+
+# Launch the API server:
+python3 serve.py --reload
+# → Open http://localhost:8000/api/docs
+```
+
 ## Is the project complete?
 
 The **core pipeline** is complete. Here's the honest picture:

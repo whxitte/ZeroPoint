@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import html as _html
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import aiohttp
 from loguru import logger
@@ -36,6 +36,25 @@ def _e(text: str) -> str:
     Any literal < > & in content must be escaped or Telegram returns 400.
     """
     return _html.escape(str(text), quote=False)
+
+
+# ---------------------------------------------------------------------------
+# Global notification semaphore
+# ---------------------------------------------------------------------------
+# Limits the number of concurrent outbound HTTPS connections to notification
+# services (Discord + Telegram). Without this, mass crawl events (176
+# interesting endpoints found at once) open hundreds of SSL connections
+# simultaneously, exhausting the OS file descriptor limit (ulimit -n 1024).
+#
+# The semaphore is lazy-initialised on first use so it's always created in
+# the correct event loop (avoids DeprecationWarning on Python 3.10+).
+_notify_sem: Optional[asyncio.Semaphore] = None
+
+def _get_notify_sem() -> asyncio.Semaphore:
+    global _notify_sem
+    if _notify_sem is None:
+        _notify_sem = asyncio.Semaphore(settings.NOTIFICATIONS_CONCURRENCY)
+    return _notify_sem
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +87,7 @@ async def _send_discord_embed(title: str, description: str, color: int, fields: 
     """
     Post a single embed to the configured Discord webhook.
     Handles 429 rate-limit responses by respecting the retry_after value.
+    The global notification semaphore caps concurrent outbound connections.
     """
     if not settings.DISCORD_WEBHOOK_URL:
         return
@@ -84,41 +104,42 @@ async def _send_discord_embed(title: str, description: str, color: int, fields: 
     payload = {"embeds": [embed]}
 
     max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    settings.DISCORD_WEBHOOK_URL,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    if resp.status in (200, 204):
-                        return  # success
+    async with _get_notify_sem():
+        for attempt in range(max_retries):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        settings.DISCORD_WEBHOOK_URL,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as resp:
+                        if resp.status in (200, 204):
+                            return  # success
 
-                    if resp.status == 429:
-                        # Discord rate limit — read retry_after and sleep exactly that long
-                        try:
-                            data        = await resp.json()
-                            retry_after = float(data.get("retry_after", 1.0))
-                        except Exception:
-                            retry_after = 1.0
-                        logger.debug(
-                            f"[discord] Rate limited (429) — sleeping {retry_after:.1f}s "
-                            f"(attempt {attempt + 1}/{max_retries})"
-                        )
-                        await asyncio.sleep(retry_after + 0.1)
-                        continue  # retry
+                        if resp.status == 429:
+                            # Discord rate limit — read retry_after and sleep exactly that long
+                            try:
+                                data        = await resp.json()
+                                retry_after = float(data.get("retry_after", 1.0))
+                            except Exception:
+                                retry_after = 1.0
+                            logger.debug(
+                                f"[discord] Rate limited (429) — sleeping {retry_after:.1f}s "
+                                f"(attempt {attempt + 1}/{max_retries})"
+                            )
+                            await asyncio.sleep(retry_after + 0.1)
+                            continue  # retry
 
-                    body = await resp.text()
-                    logger.warning(f"[discord] HTTP {resp.status}: {body[:200]}")
-                    return  # don't retry non-429 errors
+                        body = await resp.text()
+                        logger.warning(f"[discord] HTTP {resp.status}: {body[:200]}")
+                        return  # don't retry non-429 errors
 
-        except aiohttp.ClientError as exc:
-            logger.error(f"[discord] Request failed: {exc}")
-            return
-        except Exception as exc:
-            logger.error(f"[discord] Unexpected error: {exc}")
-            return
+            except aiohttp.ClientError as exc:
+                logger.error(f"[discord] Request failed: {exc}")
+                return
+            except Exception as exc:
+                logger.error(f"[discord] Unexpected error: {exc}")
+                return
 
 
 async def _send_telegram_message(text: str) -> None:
@@ -128,6 +149,7 @@ async def _send_telegram_message(text: str) -> None:
       - 429 Too Many Requests → reads retry_after, sleeps, retries up to 3 times
       - 400 Bad Request       → falls back to plain-text (no parse_mode)
       - Timeout               → one retry
+    The global notification semaphore caps concurrent outbound connections.
     """
     if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
         return
@@ -188,13 +210,14 @@ async def _send_telegram_message(text: str) -> None:
 
         return False
 
-    # Try HTML first, fall back to plain text on parse error (400)
-    success = await _post("HTML")
-    if not success:
-        # Strip HTML tags and retry as plain text
-        import re
-        plain = re.sub(r"<[^>]+>", "", text)
-        await _post("")
+    async with _get_notify_sem():
+        # Try HTML first, fall back to plain text on parse error (400)
+        success = await _post("HTML")
+        if not success:
+            # Strip HTML tags and retry as plain text
+            import re
+            plain = re.sub(r"<[^>]+>", "", text)
+            await _post("")
 
 
 async def _dispatch(discord_coro, telegram_coro) -> None:
@@ -627,3 +650,116 @@ async def notify_crawl_summary(
         _send_telegram_message(tg_body),
     )
     logger.info(f"[alerts] Crawl summary sent | program={program_id} secrets={new_secrets}")
+
+
+# ---------------------------------------------------------------------------
+# Module 6: GitHub OSINT alert dispatchers
+# ---------------------------------------------------------------------------
+
+_GH_SEV_COLOR = {
+    "critical": 0xFF0000,
+    "high":     0xFF6600,
+    "medium":   0xFFCC00,
+    "info":     0x5865F2,
+}
+
+_GH_SEV_EMOJI = {
+    "critical": "🔑",
+    "high":     "🔐",
+    "medium":   "🔓",
+    "info":     "🔍",
+}
+
+
+async def notify_github_leak(leak, program_id: str) -> None:
+    """
+    Immediate alert for a newly discovered GitHub credential leak.
+    This is the highest-signal alert in the entire platform — leaked
+    production credentials on public GitHub are often valid and critical.
+    """
+    sev   = leak.severity.value if hasattr(leak.severity, "value") else str(leak.severity)
+    emoji = _GH_SEV_EMOJI.get(sev, "🔐")
+    color = _GH_SEV_COLOR.get(sev, 0x888888)
+
+    # Redact middle of the match value
+    val      = leak.match_value
+    safe_val = (val[:6] + "..." + val[-4:]) if len(val) > 12 else val[:4] + "..."
+
+    fields = [
+        {"name": "Match Type",   "value": f"`{leak.match_type}`",      "inline": True},
+        {"name": "Severity",     "value": f"{emoji} `{sev.upper()}`",  "inline": True},
+        {"name": "Program",      "value": f"`{program_id}`",           "inline": True},
+        {"name": "Repository",   "value": f"[{leak.repo_full_name}]({leak.repo_url})", "inline": False},
+        {"name": "File",         "value": f"`{leak.file_path}`",       "inline": False},
+        {"name": "Value",        "value": f"`{safe_val}`",             "inline": True},
+    ]
+    if leak.match_context:
+        fields.append({
+            "name":  "Context",
+            "value": f"```\n{leak.match_context[:300]}\n```",
+            "inline": False,
+        })
+    fields.append({"name": "View File", "value": leak.file_url[:200], "inline": False})
+
+    discord_coro = _send_discord_embed(
+        title=f"{emoji}  GITHUB LEAK — {leak.match_type.upper()}",
+        description=f"**Repo:** `{leak.repo_full_name}`  |  **Domain:** `{leak.domain}`",
+        color=color,
+        fields=fields,
+    )
+
+    tg_lines = [
+        f"<b>{emoji} ZeroPoint — GITHUB LEAK</b>",
+        f"",
+        f"<b>Type:</b>    <code>{_e(leak.match_type)}</code>",
+        f"<b>Sev:</b>     <code>{_e(sev.upper())}</code>",
+        f"<b>Domain:</b>  <code>{_e(leak.domain)}</code>",
+        f"<b>Repo:</b>    {_e(leak.repo_full_name)}",
+        f"<b>File:</b>    <code>{_e(leak.file_path)}</code>",
+        f"<b>Value:</b>   <code>{_e(safe_val)}</code>",
+        f"<b>URL:</b>     {_e(leak.file_url[:120])}",
+    ]
+
+    await _dispatch(discord_coro, _send_telegram_message("\n".join(tg_lines)))
+    logger.success(
+        f"[alerts] GitHub leak | {sev.upper()} | {leak.match_type} | "
+        f"{leak.repo_full_name}/{leak.file_path}"
+    )
+
+
+async def notify_github_summary(
+    program_id: str,
+    new_leaks:  int,
+    by_severity: dict,
+    run_id:     str,
+) -> None:
+    """End-of-run digest for GitHub OSINT. Only fires when new leaks found."""
+    if new_leaks == 0:
+        return
+
+    crit = by_severity.get("critical", 0)
+    high = by_severity.get("high",     0)
+    med  = by_severity.get("medium",   0)
+
+    body = (
+        f"**Program:** `{program_id}`\n"
+        f"**New GitHub leaks:** **{new_leaks}**\n\n"
+        f"🔑 Critical: **{crit}**  |  🔐 High: **{high}**  |  🔓 Medium: {med}"
+    )
+
+    tg_body = (
+        f"<b>🐙 ZeroPoint — GitHub OSINT Complete</b>\n"
+        f"Program: <code>{program_id}</code>\n"
+        f"New leaks: <b>{new_leaks}</b>\n"
+        f"🔑 {crit} critical | 🔐 {high} high | 🔓 {med} medium"
+    )
+
+    await _dispatch(
+        _send_discord_embed(
+            title=f"🐙  GitHub OSINT — {program_id}",
+            description=body,
+            color=_COLOR["summary"],
+        ),
+        _send_telegram_message(tg_body),
+    )
+    logger.info(f"[alerts] GitHub summary sent | program={program_id} new={new_leaks}")

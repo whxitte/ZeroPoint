@@ -23,3 +23,14 @@ Independent async loops for each module in PipelineDaemon is a high-level engine
 - Resource Optimization: By running everything in a single Python process sharing one MongoDB connection pool, you’ve eliminated the overhead of constant process spawning, making this framework perfectly suited for a $0 home lab or a small, free-tier VPS.
 
 - Clean De-duplication: The SHA-256 fingerprinting for vulnerabilities (Module 3) and endpoints (Module 4) ensures that your Discord/Telegram notifications remain "high signal." You will only ever be alerted to something truly new.
+
+### Modules status
+
+| Component | Status     | Purpose                                      |
+|-----------|------------|----------------------------------------------|
+| Ingestion | ✅ Active  | Subdomain discovery via 3+ sources.          |
+| Probing   | ✅ Active  | Liveness & Fingerprinting.                   |
+| Scanning  | ✅ Active  | Targeted Nuclei strikes.                     |
+| Crawling  | ✅ Active  | JS secret harvesting.                        |
+| OSINT     | ✅ Active  | Continuous GitHub surveillance.              |
+| SaaS API  | ✅ Active  | Multi-tenant REST backend.                   |

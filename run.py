@@ -58,6 +58,7 @@ from loguru import logger
 import db.mongo as mongo_ops
 from config import settings
 from db.crawler_ops import ensure_crawler_indexes
+from db.github_ops import ensure_github_indexes
 from db.scanner_ops import ensure_scanner_indexes
 
 
@@ -65,13 +66,14 @@ from db.scanner_ops import ensure_scanner_indexes
 # Pipeline stage definitions
 # ─────────────────────────────────────────────────────────────────────────────
 
-ALL_MODULES = ["ingest", "probe", "scan", "crawl"]
+ALL_MODULES = ["ingest", "probe", "scan", "crawl", "github"]
 
 MODULE_LABELS = {
     "ingest": "Module 1 — Ingestion",
     "probe":  "Module 2 — Prober",
     "scan":   "Module 3 — Scanner",
     "crawl":  "Module 4 — Crawler",
+    "github": "Module 6 — GitHub OSINT",
 }
 
 # Default schedule intervals in seconds
@@ -80,6 +82,7 @@ DEFAULT_INTERVALS = {
     "probe":  7200,    # 2 hours
     "scan":   21600,   # 6 hours
     "crawl":  43200,   # 12 hours
+    "github": 21600,   # 6 hours  (GitHub rate limit: 30 req/min auth)
 }
 
 
@@ -295,12 +298,52 @@ async def run_crawl(program_id: str, force: bool = False) -> ModuleResult:
     return result
 
 
+async def run_github(program_id: str, force: bool = False) -> ModuleResult:
+    """Run Module 6 (GitHub OSINT) for one program."""
+    result = ModuleResult(module="github", program_id=program_id)
+    try:
+        from github_osint import scan_program as github_scan_program
+        from modules.github_osint import GitHubOSINTScanner
+
+        if not settings.GITHUB_TOKEN:
+            logger.warning(
+                "[orchestrator] GITHUB_TOKEN not set — skipping GitHub OSINT. "
+                "Add it to .env to enable."
+            )
+            result.stats = {"skipped": True, "reason": "GITHUB_TOKEN not configured"}
+            result.finished_at = datetime.now(timezone.utc)
+            return result
+
+        logger.info(f"[orchestrator] ▶ github | program={program_id}")
+
+        scanner = GitHubOSINTScanner(
+            github_token = settings.GITHUB_TOKEN,
+            max_results  = settings.GITHUB_OSINT_MAX_RESULTS,
+            rate_delay   = settings.GITHUB_OSINT_RATE_DELAY,
+        )
+        run = await github_scan_program(program_id, scanner)
+        result.stats = {
+            "new_leaks":   run.new_leaks,
+            "results_raw": run.results_raw,
+        }
+
+    except Exception as exc:
+        result.success = False
+        result.error   = str(exc)
+        logger.error(f"[orchestrator] github FAILED for {program_id}: {exc}")
+    finally:
+        result.finished_at = datetime.now(timezone.utc)
+
+    return result
+
+
 # Dispatch table — maps module name → runner function
 MODULE_RUNNERS = {
     "ingest": run_ingest,
     "probe":  run_probe,
     "scan":   run_scan,
     "crawl":  run_crawl,
+    "github": run_github,
 }
 
 
@@ -450,6 +493,7 @@ class PipelineDaemon:
       probe  → every DAEMON_PROBE_INTERVAL seconds   (default: 2h)
       scan   → every DAEMON_SCAN_INTERVAL seconds    (default: 6h)
       crawl  → every DAEMON_CRAWL_INTERVAL seconds   (default: 12h)
+      github → every DAEMON_GITHUB_INTERVAL seconds  (default: 6h)
     """
 
     def __init__(
@@ -467,6 +511,7 @@ class PipelineDaemon:
             "probe":  settings.DAEMON_PROBE_INTERVAL,
             "scan":   settings.DAEMON_SCAN_INTERVAL,
             "crawl":  settings.DAEMON_CRAWL_INTERVAL,
+            "github": settings.DAEMON_GITHUB_INTERVAL,
         }
         self._last_run:   Dict[str, Optional[datetime]] = {m: None for m in ALL_MODULES}
         self._running:    bool = True
@@ -589,6 +634,7 @@ async def bootstrap_db() -> None:
     await mongo_ops.ensure_indexes()
     await ensure_scanner_indexes()
     await ensure_crawler_indexes()
+    await ensure_github_indexes()
     logger.debug("[orchestrator] All DB indexes verified ✓")
 
 
@@ -697,6 +743,10 @@ Examples:
         "--crawl-interval", type=int, default=None,
         help="Daemon: seconds between crawl runs (default: 43200)",
     )
+    p.add_argument(
+        "--github-interval", type=int, default=None,
+        help="Daemon: seconds between GitHub OSINT runs (default: 21600)",
+    )
 
     return p
 
@@ -749,6 +799,7 @@ async def main() -> None:
                 "probe":  args.probe_interval  or settings.DAEMON_PROBE_INTERVAL,
                 "scan":   args.scan_interval   or settings.DAEMON_SCAN_INTERVAL,
                 "crawl":  args.crawl_interval  or settings.DAEMON_CRAWL_INTERVAL,
+                "github": args.github_interval or settings.DAEMON_GITHUB_INTERVAL,
             }
             daemon = PipelineDaemon(
                 program_id = args.program_id,
