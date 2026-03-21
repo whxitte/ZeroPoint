@@ -154,6 +154,27 @@ python3 serve.py --reload
 # → Open http://localhost:8000/api/docs
 ```
 
+## Test Port scaan
+```bash
+# This may require sudo privilaages, because masscan need raw socket privileges:
+# sudo -E $(which python3) port_scanner.py --ip 35.213.175.146
+# OR
+# Permanent fix (run once, no more sudo needed):
+# sudo setcap cap_net_raw+ep $(which masscan)
+# Now masscan works without sudo
+python3 port_scanner.py --ip 1.2.3.4          # no DB write
+python3 run.py --program-id gitlab_h1 --modules portscan
+```
+
+## Test Google dork
+```bash
+# 1. console.cloud.google.com → enable "Custom Search API" → API key
+# 2. cse.google.com/cse → create engine → "Search the entire web" → get cx ID
+python3 google_dork.py --domain gitlab.com     # no DB write
+python3 run.py --program-id gitlab_h1 --modules dork
+```
+
+
 ## Is the project complete?
 
 The **core pipeline** is complete. Here's the honest picture:

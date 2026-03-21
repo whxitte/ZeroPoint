@@ -65,6 +65,8 @@ go install github.com/projectdiscovery/katana/cmd/katana@latest
 go install github.com/tomnomnom/waybackurls@latest
 go install github.com/lc/gau/v2/cmd/gau@latest
 
+sudo apt install masscan nmap
+
 # Optional but recommended — SecretFinder
 git clone https://github.com/m4ll0k/SecretFinder.git /opt/SecretFinder
 pip install jsbeautifier requests
@@ -381,6 +383,38 @@ python3 run.py --program-id shopify_h1 --severity critical,high # Override Nucle
 python3 run.py --program-id shopify_h1 --dry-run                # Preview without executing
 python3 run.py --program-id shopify_h1 --stop-on-error          # Abort pipeline if any module fails
 
+```
+---
+
+```
+# Module 7 — install tools
+sudo apt install masscan nmap
+
+# Module 8 — 5-min Google setup (100 free queries/day)
+# 1. console.cloud.google.com → Custom Search API → API key
+# 2. cse.google.com/cse → create engine (search entire web) → get cx ID
+# Add to .env:
+GOOGLE_API_KEY=AIzaSy...
+GOOGLE_CSE_ID=abc123...
+
+# Test Module 7 (no DB write):
+# This may require sudo privilaages, because masscan need raw socket privileges:
+# sudo -E $(which python3) port_scanner.py --ip 35.213.175.146
+# OR
+# Permanent fix (run once, no more sudo needed):
+# sudo setcap cap_net_raw+ep $(which masscan)
+# Now masscan works without sudo
+
+python3 port_scanner.py --ip 1.2.3.4
+
+# Test Module 8 (no DB write):
+python3 google_dork.py --domain shopify.com
+
+# Run both via orchestrator:
+python3 run.py --program-id shopify_h1 --modules portscan,dork
+
+# Full 8-module daemon:
+python3 run.py --daemon
 ```
 
 ## Daemon mode — 24/7 autonomous monitoring:

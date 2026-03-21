@@ -13,6 +13,9 @@ Independent async loops for each module in PipelineDaemon is a high-level engine
 | 3          | Scanner   | Every 6 Hours   | Targeted Nuclei strikes using tech-stack-derived template tags to maximize signal    |
 | 4          | Crawler   | Every 12 Hours  | Deep active and historical crawling for JS secrets with Shannon Entropy filtering    |
 | 5          | Watchtower| Continuous      | Autonomous daemon managing independent duty cycles and graceful shutdowns            |
+| 6          | github  | Every 6 Hours  | Leaked credentials on GitHub                          |
+| 7          | portscan| Every 24 Hours  | Exposed Redis/MongoDB/Docker/K8s                                        |
+| 8          | Google Dork| Every 24 Hours  | Indexed .env files, SQL dumps, keys                                        |
 
 ---
 

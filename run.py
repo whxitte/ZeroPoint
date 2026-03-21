@@ -66,24 +66,29 @@ from db.scanner_ops import ensure_scanner_indexes
 # Pipeline stage definitions
 # ─────────────────────────────────────────────────────────────────────────────
 
-ALL_MODULES = ["ingest", "probe", "scan", "crawl", "github"]
+ALL_MODULES = ["ingest", "probe", "scan", "crawl", "github", "portscan", "dork"]
 
 MODULE_LABELS = {
-    "ingest": "Module 1 — Ingestion",
-    "probe":  "Module 2 — Prober",
-    "scan":   "Module 3 — Scanner",
-    "crawl":  "Module 4 — Crawler",
-    "github": "Module 6 — GitHub OSINT",
+    "ingest":   "Module 1 \u2014 Ingestion",
+    "probe":    "Module 2 \u2014 Prober",
+    "scan":     "Module 3 \u2014 Scanner",
+    "crawl":    "Module 4 \u2014 Crawler",
+    "github":   "Module 6 \u2014 GitHub OSINT",
+    "portscan": "Module 7 \u2014 Port Scanner",
+    "dork":     "Module 8 \u2014 Google Dork Engine",
 }
 
 # Default schedule intervals in seconds
 DEFAULT_INTERVALS = {
-    "ingest": 3600,    # 1 hour
-    "probe":  7200,    # 2 hours
-    "scan":   21600,   # 6 hours
-    "crawl":  43200,   # 12 hours
-    "github": 21600,   # 6 hours  (GitHub rate limit: 30 req/min auth)
+    "ingest":   3600,    # 1 hour
+    "probe":    7200,    # 2 hours
+    "scan":     21600,   # 6 hours
+    "crawl":    43200,   # 12 hours
+    "github":   21600,   # 6 hours  (GitHub rate limit: 30 req/min auth)
+    "portscan": 86400,   # 24 hours (port scan daily)
+    "dork":     86400,   # 24 hours (Google CSE: 100 free queries/day)
 }
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -337,13 +342,79 @@ async def run_github(program_id: str, force: bool = False) -> ModuleResult:
     return result
 
 
+async def run_portscan(program_id: str, force: bool = False) -> ModuleResult:
+    """Run Module 7 (Port Scanner) for one program."""
+    result = ModuleResult(module="portscan", program_id=program_id)
+    try:
+        from port_scanner import scan_program as portscan_scan_program, _build_scanner
+        from db.portscan_ops import ensure_portscan_indexes
+
+        await ensure_portscan_indexes()
+
+        logger.info(f"[orchestrator] ▶ portscan | program={program_id}")
+        scanner = _build_scanner()
+        run     = await portscan_scan_program(program_id, scanner)
+        result.stats = {
+            "targets":      run.targets,
+            "ports_found":  run.ports_found,
+            "new_findings": run.new_findings,
+        }
+
+    except Exception as exc:
+        result.success = False
+        result.error   = str(exc)
+        logger.error(f"[orchestrator] portscan FAILED for {program_id}: {exc}")
+    finally:
+        result.finished_at = datetime.now(timezone.utc)
+
+    return result
+
+
+
+async def run_dork(program_id: str, force: bool = False) -> ModuleResult:
+    """Run Module 8 (Google Dork Engine) for one program."""
+    result = ModuleResult(module="dork", program_id=program_id)
+    try:
+        from google_dork import dork_program, _build_dorker
+        from db.dork_ops import ensure_dork_indexes
+
+        if not settings.GOOGLE_API_KEY or not settings.GOOGLE_CSE_ID:
+            logger.warning(
+                "[orchestrator] GOOGLE_API_KEY or GOOGLE_CSE_ID not set — skipping dork. "
+                "Add both to .env to enable Module 8."
+            )
+            result.stats      = {"skipped": True, "reason": "Google API credentials not configured"}
+            result.finished_at = datetime.now(timezone.utc)
+            return result
+
+        await ensure_dork_indexes()
+        logger.info(f"[orchestrator] ▶ dork | program={program_id}")
+        dorker = _build_dorker()
+        run    = await dork_program(program_id, dorker)
+        result.stats = {
+            "new_findings": run.new_findings,
+            "results_raw":  run.results_raw,
+        }
+
+    except Exception as exc:
+        result.success = False
+        result.error   = str(exc)
+        logger.error(f"[orchestrator] dork FAILED for {program_id}: {exc}")
+    finally:
+        result.finished_at = datetime.now(timezone.utc)
+
+    return result
+
+
 # Dispatch table — maps module name → runner function
 MODULE_RUNNERS = {
-    "ingest": run_ingest,
-    "probe":  run_probe,
-    "scan":   run_scan,
-    "crawl":  run_crawl,
-    "github": run_github,
+    "ingest":   run_ingest,
+    "probe":    run_probe,
+    "scan":     run_scan,
+    "crawl":    run_crawl,
+    "github":   run_github,
+    "portscan": run_portscan,
+    "dork":     run_dork,
 }
 
 
@@ -507,11 +578,13 @@ class PipelineDaemon:
         self.modules    = modules
         self.severity   = severity
         self.intervals  = intervals or {
-            "ingest": settings.DAEMON_INGEST_INTERVAL,
-            "probe":  settings.DAEMON_PROBE_INTERVAL,
-            "scan":   settings.DAEMON_SCAN_INTERVAL,
-            "crawl":  settings.DAEMON_CRAWL_INTERVAL,
-            "github": settings.DAEMON_GITHUB_INTERVAL,
+            "ingest":   settings.DAEMON_INGEST_INTERVAL,
+            "probe":    settings.DAEMON_PROBE_INTERVAL,
+            "scan":     settings.DAEMON_SCAN_INTERVAL,
+            "crawl":    settings.DAEMON_CRAWL_INTERVAL,
+            "github":   settings.DAEMON_GITHUB_INTERVAL,
+            "portscan": settings.DAEMON_PORTSCAN_INTERVAL,
+            "dork":     settings.DAEMON_DORK_INTERVAL,
         }
         self._last_run:   Dict[str, Optional[datetime]] = {m: None for m in ALL_MODULES}
         self._running:    bool = True
@@ -635,6 +708,10 @@ async def bootstrap_db() -> None:
     await ensure_scanner_indexes()
     await ensure_crawler_indexes()
     await ensure_github_indexes()
+    from db.portscan_ops import ensure_portscan_indexes
+    await ensure_portscan_indexes()
+    from db.dork_ops import ensure_dork_indexes
+    await ensure_dork_indexes()
     logger.debug("[orchestrator] All DB indexes verified ✓")
 
 
@@ -747,6 +824,14 @@ Examples:
         "--github-interval", type=int, default=None,
         help="Daemon: seconds between GitHub OSINT runs (default: 21600)",
     )
+    p.add_argument(
+        "--portscan-interval", type=int, default=None,
+        help="Daemon: seconds between port scan runs (default: 86400)",
+    )
+    p.add_argument(
+        "--dork-interval", type=int, default=None,
+        help="Daemon: seconds between Google dork runs (default: 86400)",
+    )
 
     return p
 
@@ -795,11 +880,13 @@ async def main() -> None:
         if args.daemon:
             # ── Daemon mode ───────────────────────────────────────────────
             intervals = {
-                "ingest": args.ingest_interval or settings.DAEMON_INGEST_INTERVAL,
-                "probe":  args.probe_interval  or settings.DAEMON_PROBE_INTERVAL,
-                "scan":   args.scan_interval   or settings.DAEMON_SCAN_INTERVAL,
-                "crawl":  args.crawl_interval  or settings.DAEMON_CRAWL_INTERVAL,
-                "github": args.github_interval or settings.DAEMON_GITHUB_INTERVAL,
+                "ingest":   args.ingest_interval   or settings.DAEMON_INGEST_INTERVAL,
+                "probe":    args.probe_interval    or settings.DAEMON_PROBE_INTERVAL,
+                "scan":     args.scan_interval     or settings.DAEMON_SCAN_INTERVAL,
+                "crawl":    args.crawl_interval    or settings.DAEMON_CRAWL_INTERVAL,
+                "github":   args.github_interval   or settings.DAEMON_GITHUB_INTERVAL,
+                "portscan": args.portscan_interval or settings.DAEMON_PORTSCAN_INTERVAL,
+                "dork":     args.dork_interval     or settings.DAEMON_DORK_INTERVAL,
             }
             daemon = PipelineDaemon(
                 program_id = args.program_id,

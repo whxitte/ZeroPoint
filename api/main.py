@@ -22,6 +22,12 @@ Endpoints:
   GET    /api/v1/findings/stats/summary — severity breakdown
   GET    /api/v1/leaks/?program_id=X    — list GitHub leaks
   GET    /api/v1/leaks/stats            — leak statistics
+  GET    /api/v1/portfindings/          — list port scanner findings
+  GET    /api/v1/portfindings/stats     — port scan statistics
+  GET    /api/v1/portfindings/critical  — CRITICAL exposed services
+  GET    /api/v1/dorks/                 — list Google dork findings
+  GET    /api/v1/dorks/stats            — dork statistics
+  GET    /api/v1/dorks/exposed-files    — exposed files found via dorking
   GET    /api/v1/health                 — health check
 
 Authentication:
@@ -57,7 +63,7 @@ from db.crawler_ops import ensure_crawler_indexes
 from db.github_ops import ensure_github_indexes
 from db.scanner_ops import ensure_scanner_indexes
 
-from api.routes import auth, programs, assets, findings, leaks
+from api.routes import auth, programs, assets, findings, leaks, port_findings, dork_results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,6 +91,10 @@ async def lifespan(app: FastAPI):
     await ensure_scanner_indexes()
     await ensure_crawler_indexes()
     await ensure_github_indexes()
+    from db.portscan_ops import ensure_portscan_indexes
+    await ensure_portscan_indexes()
+    from db.dork_ops import ensure_dork_indexes
+    await ensure_dork_indexes()
     await _ensure_default_tenant()
     logger.info("ZeroPoint API ready ✓")
     yield
@@ -158,7 +168,9 @@ app.include_router(auth.router,     prefix=PREFIX)
 app.include_router(programs.router, prefix=PREFIX)
 app.include_router(assets.router,   prefix=PREFIX)
 app.include_router(findings.router, prefix=PREFIX)
-app.include_router(leaks.router,    prefix=PREFIX)
+app.include_router(leaks.router,          prefix=PREFIX)
+app.include_router(port_findings.router,  prefix=PREFIX)
+app.include_router(dork_results.router,   prefix=PREFIX)
 
 
 @app.get("/api/v1/health", tags=["system"])

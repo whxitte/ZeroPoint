@@ -437,3 +437,140 @@ class GitHubOSINTRun(BaseModel):
     new_leaks:    int      = 0        # net-new after dedup
     errors:       List[str] = Field(default_factory=list)
     success:      bool     = True
+
+
+# ---------------------------------------------------------------------------
+# Module 7: Port Scanner
+# ---------------------------------------------------------------------------
+
+class PortFindingSeverity(str, Enum):
+    """
+    Triage severity for an exposed service.
+    CRITICAL → unauthenticated access to a dangerous service (Redis, MongoDB, ES)
+    HIGH     → exposed admin UI or sensitive service
+    MEDIUM   → unusual open port worth investigating
+    INFO     → expected service (HTTP/HTTPS/SSH)
+    """
+    CRITICAL = "critical"
+    HIGH     = "high"
+    MEDIUM   = "medium"
+    INFO     = "info"
+
+
+class PortFinding(BaseModel):
+    """
+    A single open port / service discovered by the port scanner.
+    Stored in the `port_findings` collection.
+
+    Dedup key: sha256(ip + port + protocol)
+    Same port on same IP never alerts twice.
+    """
+    tenant_id:    str     = "default"
+
+    finding_id:   str                          # sha256 dedup fingerprint
+    program_id:   str
+    domain:       str                          # asset domain this IP belongs to
+    ip:           str                          # IP address scanned
+    port:         int
+    protocol:     str     = "tcp"              # tcp | udp
+    service:      Optional[str]  = None        # service name (redis, mongodb, http…)
+    product:      Optional[str]  = None        # product/version string from Nmap
+    banner:       Optional[str]  = None        # raw service banner (first 500 chars)
+    severity:     PortFindingSeverity = PortFindingSeverity.INFO
+    reason:       str     = ""                 # why this severity was assigned
+    is_new:       bool    = True
+    scan_run_id:  Optional[str]  = None
+    first_seen:   datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen:    datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_validator("domain", mode="before")
+    @classmethod
+    def normalise_domain(cls, v: str) -> str:
+        return v.lower().strip().rstrip(".")
+
+    @field_validator("ip", mode="before")
+    @classmethod
+    def strip_ip(cls, v: str) -> str:
+        return v.strip()
+
+
+class PortScanRun(BaseModel):
+    """Audit record for a port scan run."""
+    run_id:          str      = Field(default_factory=lambda: __import__("uuid").uuid4().hex)
+    program_id:      str
+    started_at:      datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    finished_at:     Optional[datetime] = None
+    targets:         int      = 0    # IP addresses scanned
+    ports_found:     int      = 0    # total open ports
+    new_findings:    int      = 0    # net-new after dedup
+    errors:          List[str] = Field(default_factory=list)
+    success:         bool     = True
+
+
+# ---------------------------------------------------------------------------
+# Module 8: Google Dork Engine
+# ---------------------------------------------------------------------------
+
+class DorkSeverity(str, Enum):
+    """
+    Triage severity for a Google dork result.
+    CRITICAL → directly exposed secret or backup file
+    HIGH     → admin panel, login, config file
+    MEDIUM   → sensitive directory listing or error page
+    INFO     → generic exposure worth investigating
+    """
+    CRITICAL = "critical"
+    HIGH     = "high"
+    MEDIUM   = "medium"
+    INFO     = "info"
+
+
+class DorkResult(BaseModel):
+    """
+    A single result from a Google dork query.
+    Stored in the `dork_results` collection.
+
+    Dedup key: sha256(domain + dork_category + url[:80])
+    Same URL from the same dork type never alerts twice.
+    """
+    tenant_id:    str     = "default"
+
+    result_id:    str                          # sha256 dedup fingerprint
+    program_id:   str
+    domain:       str                          # root domain being dorked
+
+    url:          str                          # discovered URL
+    title:        Optional[str]  = None        # page title from search snippet
+    snippet:      Optional[str]  = None        # search result snippet
+    dork_query:   str            = ""          # exact query that found it
+    dork_category: str           = ""          # category e.g. "exposed_files"
+    severity:     DorkSeverity  = DorkSeverity.INFO
+    reason:       str           = ""           # human readable reason
+
+    is_new:       bool          = True
+    scan_run_id:  Optional[str] = None
+    first_seen:   datetime      = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen:    datetime      = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_validator("domain", mode="before")
+    @classmethod
+    def normalise_domain(cls, v: str) -> str:
+        return v.lower().strip().rstrip(".")
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def truncate_url(cls, v: str) -> str:
+        return v[:500] if v else v
+
+
+class DorkScanRun(BaseModel):
+    """Audit record for a dork scan run."""
+    run_id:          str      = Field(default_factory=lambda: __import__("uuid").uuid4().hex)
+    program_id:      str
+    started_at:      datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    finished_at:     Optional[datetime] = None
+    queries_run:     int      = 0
+    results_raw:     int      = 0    # total results before dedup
+    new_findings:    int      = 0    # net-new after dedup
+    errors:          List[str] = Field(default_factory=list)
+    success:         bool     = True

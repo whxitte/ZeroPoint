@@ -763,3 +763,226 @@ async def notify_github_summary(
         _send_telegram_message(tg_body),
     )
     logger.info(f"[alerts] GitHub summary sent | program={program_id} new={new_leaks}")
+
+# ---------------------------------------------------------------------------
+# Module 7: Port Scanner alert dispatchers
+# ---------------------------------------------------------------------------
+
+_PORT_SEV_COLOR = {
+    "critical": 0xFF0000,
+    "high":     0xFF6600,
+    "medium":   0xFFCC00,
+    "info":     0x5865F2,
+}
+
+_PORT_SEV_EMOJI = {
+    "critical": "🚨",
+    "high":     "🔴",
+    "medium":   "🟡",
+    "info":     "🔵",
+}
+
+
+async def notify_port_finding(finding, program_id: str) -> None:
+    """
+    Immediate alert for a newly discovered open port / exposed service.
+    Fires for CRITICAL and HIGH severity findings only.
+    `finding` is a PortFinding model instance.
+    """
+    sev   = finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity)
+    emoji = _PORT_SEV_EMOJI.get(sev, "🔵")
+    color = _PORT_SEV_COLOR.get(sev, 0x888888)
+
+    svc_str = finding.service or "unknown"
+    prd_str = f" ({finding.product})" if finding.product else ""
+
+    fields = [
+        {"name": "IP:Port",   "value": f"`{finding.ip}:{finding.port}/{finding.protocol}`", "inline": True},
+        {"name": "Service",   "value": f"`{svc_str}{prd_str}`",                              "inline": True},
+        {"name": "Severity",  "value": f"{emoji} `{sev.upper()}`",                          "inline": True},
+        {"name": "Domain",    "value": f"`{finding.domain}`",                                "inline": True},
+        {"name": "Program",   "value": f"`{program_id}`",                                   "inline": True},
+        {"name": "Reason",    "value": finding.reason or "—",                               "inline": False},
+    ]
+    if finding.banner:
+        fields.append({
+            "name":  "Banner",
+            "value": f"```\n{finding.banner[:400]}\n```",
+            "inline": False,
+        })
+
+    discord_coro = _send_discord_embed(
+        title=f"{emoji}  EXPOSED PORT — {finding.ip}:{finding.port}",
+        description=f"**Domain:** `{finding.domain}`  |  **Service:** `{svc_str}`",
+        color=color,
+        fields=fields,
+    )
+
+    tg_lines = [
+        f"<b>{emoji} ZeroPoint — EXPOSED PORT</b>",
+        f"",
+        f"<b>IP:Port:</b>  <code>{_e(finding.ip)}:{finding.port}/{finding.protocol}</code>",
+        f"<b>Service:</b>  {_e(svc_str)}{_e(prd_str)}",
+        f"<b>Domain:</b>   <code>{_e(finding.domain)}</code>",
+        f"<b>Program:</b>  <code>{_e(program_id)}</code>",
+        f"<b>Severity:</b> <code>{_e(sev.upper())}</code>",
+        f"<b>Reason:</b>   {_e(finding.reason or '—')}",
+    ]
+    if finding.banner:
+        tg_lines.append(f"<b>Banner:</b>   <code>{_e(finding.banner[:200])}</code>")
+
+    await _dispatch(discord_coro, _send_telegram_message("\n".join(tg_lines)))
+    logger.log(
+        "SUCCESS" if sev == "critical" else "INFO",
+        f"[alerts] Port finding alert | {sev.upper()} | "
+        f"{finding.ip}:{finding.port}/{finding.protocol} | {finding.domain}",
+    )
+
+
+async def notify_port_scan_summary(
+    program_id:   str,
+    targets:      int,
+    new_findings: int,
+    by_severity:  dict,
+    run_id:       str,
+) -> None:
+    """End-of-scan digest. Only fires when there are new findings."""
+    if new_findings == 0:
+        return
+
+    crit = by_severity.get("critical", 0)
+    high = by_severity.get("high",     0)
+    med  = by_severity.get("medium",   0)
+
+    body = (
+        f"**Program:** `{program_id}`\n"
+        f"**IPs scanned:** {targets}\n"
+        f"**New open ports:** **{new_findings}**\n\n"
+        f"🚨 Critical: **{crit}**  |  🔴 High: **{high}**  |  🟡 Medium: {med}"
+    )
+
+    tg_body = (
+        f"<b>🔌 ZeroPoint — Port Scan Complete</b>\n"
+        f"Program: <code>{program_id}</code>\n"
+        f"IPs: {targets} | New ports: <b>{new_findings}</b>\n"
+        f"🚨 {crit} critical | 🔴 {high} high | 🟡 {med} medium"
+    )
+
+    await _dispatch(
+        _send_discord_embed(
+            title=f"🔌  Port Scan Summary — {program_id}",
+            description=body,
+            color=_COLOR["summary"],
+        ),
+        _send_telegram_message(tg_body),
+    )
+    logger.info(f"[alerts] Port scan summary sent | program={program_id} new={new_findings}")
+
+
+# ---------------------------------------------------------------------------
+# Module 8: Google Dork Engine alert dispatchers
+# ---------------------------------------------------------------------------
+
+_DORK_SEV_COLOR = {
+    "critical": 0xFF0000,
+    "high":     0xFF6600,
+    "medium":   0xFFCC00,
+    "info":     0x5865F2,
+}
+
+_DORK_SEV_EMOJI = {
+    "critical": "🔍",
+    "high":     "🔴",
+    "medium":   "🟡",
+    "info":     "🔵",
+}
+
+
+async def notify_dork_finding(finding, program_id: str) -> None:
+    """
+    Immediate alert for a newly discovered dork result.
+    Fires for CRITICAL and HIGH severity results only.
+    `finding` is a DorkResult model instance.
+    """
+    sev      = finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity)
+    emoji    = _DORK_SEV_EMOJI.get(sev, "🔍")
+    color    = _DORK_SEV_COLOR.get(sev, 0x888888)
+    cat_str  = finding.dork_category.replace("_", " ").title()
+
+    fields = [
+        {"name": "Category",  "value": f"`{cat_str}`",          "inline": True},
+        {"name": "Severity",  "value": f"{emoji} `{sev.upper()}`", "inline": True},
+        {"name": "Program",   "value": f"`{program_id}`",        "inline": True},
+        {"name": "Domain",    "value": f"`{finding.domain}`",    "inline": True},
+        {"name": "URL",       "value": finding.url[:200],        "inline": False},
+        {"name": "Why",       "value": finding.reason,           "inline": False},
+    ]
+    if finding.title:
+        fields.append({"name": "Title", "value": finding.title[:120], "inline": False})
+    if finding.snippet:
+        fields.append({"name": "Snippet", "value": finding.snippet[:300], "inline": False})
+    fields.append({"name": "Query", "value": f"`{finding.dork_query[:200]}`", "inline": False})
+
+    discord_coro = _send_discord_embed(
+        title=f"{emoji}  DORK FINDING — {cat_str}",
+        description=f"**Domain:** `{finding.domain}`",
+        color=color,
+        fields=fields,
+    )
+
+    tg_lines = [
+        f"<b>{emoji} ZeroPoint — DORK FINDING</b>",
+        f"",
+        f"<b>Category:</b> {_e(cat_str)}",
+        f"<b>Severity:</b> <code>{_e(sev.upper())}</code>",
+        f"<b>Domain:</b>   <code>{_e(finding.domain)}</code>",
+        f"<b>Program:</b>  <code>{_e(program_id)}</code>",
+        f"<b>URL:</b>      {_e(finding.url[:150])}",
+        f"<b>Why:</b>      {_e(finding.reason)}",
+    ]
+    if finding.title:
+        tg_lines.append(f"<b>Title:</b>    {_e(finding.title[:100])}")
+
+    await _dispatch(discord_coro, _send_telegram_message("\n".join(tg_lines)))
+    logger.log(
+        "SUCCESS" if sev == "critical" else "INFO",
+        f"[alerts] Dork alert | {sev.upper()} | {finding.dork_category} | {finding.url[:80]}",
+    )
+
+
+async def notify_dork_summary(
+    program_id:   str,
+    new_findings: int,
+    by_severity:  dict,
+    run_id:       str,
+) -> None:
+    """End-of-run digest for Google Dork scans. Only fires when new findings exist."""
+    if new_findings == 0:
+        return
+
+    crit = by_severity.get("critical", 0)
+    high = by_severity.get("high",     0)
+    med  = by_severity.get("medium",   0)
+
+    body = (
+        f"**Program:** `{program_id}`\n"
+        f"**New dork findings:** **{new_findings}**\n\n"
+        f"🔍 Critical: **{crit}**  |  🔴 High: **{high}**  |  🟡 Medium: {med}"
+    )
+
+    tg_body = (
+        f"<b>🔍 ZeroPoint — Dork Scan Complete</b>\n"
+        f"Program: <code>{program_id}</code>\n"
+        f"New findings: <b>{new_findings}</b>\n"
+        f"🔍 {crit} critical | 🔴 {high} high | 🟡 {med} medium"
+    )
+
+    await _dispatch(
+        _send_discord_embed(
+            title=f"🔍  Dork Summary — {program_id}",
+            description=body,
+            color=_COLOR["summary"],
+        ),
+        _send_telegram_message(tg_body),
+    )
+    logger.info(f"[alerts] Dork summary sent | program={program_id} new={new_findings}")
