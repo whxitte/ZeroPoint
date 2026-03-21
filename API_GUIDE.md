@@ -1,50 +1,36 @@
 # ZeroPoint REST API — Complete Guide
 
-The ZeroPoint REST API exposes all pipeline data over HTTP. You can use it to build dashboards, integrate with other tools, or query findings programmatically.
+The ZeroPoint REST API exposes all pipeline data over HTTP. Use it to build dashboards, integrate with external tools, or query findings programmatically.
 
-**Swagger UI (interactive docs):** `http://localhost:8000/api/docs`  
-**ReDoc (clean reference):** `http://localhost:8000/api/redoc`
+**Swagger UI (interactive):** `http://localhost:8000/api/docs`  
+**ReDoc (clean reference):** `http://localhost:8000/api/redoc`  
+**OpenAPI schema:** `http://localhost:8000/api/openapi.json`
 
-FastAPI auto-generates these docs directly from the route code — every endpoint, parameter, and response schema is documented automatically. You don't maintain docs separately; the code is the docs.
+FastAPI auto-generates docs from route decorators, Pydantic models, and docstrings — no separate documentation to maintain.
 
 ---
 
 ## 1. Start the API Server
 
 ```bash
-# Install deps first (one time):
-pip install -r requirements.txt
-
-# Start the server:
-python3 serve.py
-
-# Development mode (auto-restarts when you change code):
-python3 serve.py --reload
-
-# Custom port:
-python3 serve.py --port 9000
+python3 serve.py                    # default: 0.0.0.0:8000
+python3 serve.py --reload           # hot-reload for development
+python3 serve.py --port 9000        # custom port
+python3 serve.py --host 127.0.0.1   # localhost only (more secure)
 ```
-
-The server starts at `http://0.0.0.0:8000` by default.
 
 ---
 
 ## 2. Get Your API Key
 
-The API requires authentication. On **first start**, the server creates a default tenant and prints the API key to the console. If you missed it, run:
+On first start, the server creates a default tenant and prints the key. If you missed it:
 
 ```bash
-python3 get_api_key.py
+python3 get_api_key.py          # show current key (from .env) or create one
+python3 get_api_key.py --rotate # generate a new key (invalidates old one)
 ```
 
-If you've never set `ZEROPOINT_API_KEY` in your `.env`, the key was stored hashed and can't be recovered. Generate a new one:
-
-```bash
-python3 get_api_key.py --rotate
-```
-
-This prints your key and a `curl` command you can test immediately. Add the key to your `.env`:
-
+Add to `.env`:
 ```env
 ZEROPOINT_API_KEY=zp_your_key_here
 ```
@@ -53,88 +39,42 @@ ZEROPOINT_API_KEY=zp_your_key_here
 
 ## 3. Authentication
 
-Every endpoint (except `/api/v1/health`) requires authentication. Two methods:
+All endpoints except `/api/v1/health` require authentication.
 
-### Method A — API Key (simplest, for scripts and curl)
-
-Pass the key directly in the request header:
-
+### Method A — API Key (for scripts and curl)
 ```bash
 curl http://localhost:8000/api/v1/programs/ \
-  -H "X-API-Key: zp_your_key_here"
+  -H "X-API-Key: zp_your_key"
 ```
 
-### Method B — JWT Bearer Token (for dashboards and browsers)
-
-Exchange your API key for a short-lived JWT token:
-
+### Method B — JWT Bearer Token (for browsers and dashboards)
 ```bash
-curl -X POST http://localhost:8000/api/v1/auth/token \
-  -H "Content-Type: application/json" \
-  -d '{"tenant_id": "default", "api_key": "zp_your_key_here"}'
-```
-
-Response:
-```json
-{
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "token_type": "bearer",
-  "tenant_id": "default"
-}
-```
-
-Then use the JWT in subsequent requests:
-
-```bash
-curl http://localhost:8000/api/v1/programs/ \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-```
-
-JWT tokens expire after 24 hours (configurable via `API_TOKEN_EXPIRE_MINUTES` in `.env`).
-
----
-
-## 4. Authorize in Swagger UI
-
-1. Open `http://localhost:8000/api/docs`
-2. Click the **Authorize** button (top right, lock icon)
-3. In the **HTTPBearer** field, paste your JWT token (just the token, not `Bearer `)
-4. Click **Authorize** → **Close**
-5. All subsequent requests from the UI will be authenticated
-
-To get the JWT for Swagger UI:
-- Use the `POST /api/v1/auth/token` endpoint directly in Swagger
-- Or run the curl command from Section 3 above and copy the `access_token` value
-
----
-
-## 5. Endpoints Reference
-
-### System (no auth required)
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/v1/health` | DB connectivity check |
-
-```bash
-curl http://localhost:8000/api/v1/health
-```
-```json
-{"status": "ok", "db": "connected", "version": "1.0.0"}
-```
-
----
-
-### Auth
-
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/api/v1/auth/token` | Exchange API key for JWT |
-
-```bash
+# Exchange API key for JWT
 curl -X POST http://localhost:8000/api/v1/auth/token \
   -H "Content-Type: application/json" \
   -d '{"tenant_id": "default", "api_key": "zp_your_key"}'
+
+# Use the JWT
+curl http://localhost:8000/api/v1/programs/ \
+  -H "Authorization: Bearer eyJhbGci..."
+```
+
+JWT tokens expire after 24 hours (configurable: `API_TOKEN_EXPIRE_MINUTES` in `.env`).
+
+---
+
+## 4. Endpoints Reference
+
+### System
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/api/v1/health` | None | DB connectivity check |
+| POST | `/api/v1/auth/token` | None | Exchange API key for JWT |
+
+```bash
+curl http://localhost:8000/api/v1/health
+# → {"status": "ok", "db": "connected", "version": "1.0.0"}
 ```
 
 ---
@@ -142,28 +82,21 @@ curl -X POST http://localhost:8000/api/v1/auth/token \
 ### Programs
 
 | Method | Endpoint | Description |
-|---|---|---|
+|--------|----------|-------------|
 | GET | `/api/v1/programs/` | List all active programs |
-| POST | `/api/v1/programs/` | Create a new program |
+| POST | `/api/v1/programs/` | Create a program |
 | GET | `/api/v1/programs/{program_id}` | Get one program |
 | DELETE | `/api/v1/programs/{program_id}` | Deactivate a program |
 
 ```bash
-# List programs
-curl http://localhost:8000/api/v1/programs/ \
-  -H "X-API-Key: zp_your_key"
+# List
+curl http://localhost:8000/api/v1/programs/ -H "X-API-Key: zp_..."
 
-# Create a program
+# Create
 curl -X POST http://localhost:8000/api/v1/programs/ \
-  -H "X-API-Key: zp_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "program_id": "tesla_h1",
-    "name": "Tesla",
-    "platform": "hackerone",
-    "domains": ["tesla.com"],
-    "wildcards": ["*.tesla.com"]
-  }'
+  -H "X-API-Key: zp_..." -H "Content-Type: application/json" \
+  -d '{"program_id": "tesla_h1", "name": "Tesla", "platform": "hackerone",
+       "domains": ["tesla.com"], "wildcards": ["*.tesla.com"]}'
 ```
 
 ---
@@ -171,29 +104,26 @@ curl -X POST http://localhost:8000/api/v1/programs/ \
 ### Assets
 
 | Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/v1/assets/` | List assets (filterable) |
-| GET | `/api/v1/assets/stats` | Asset counts by interest level |
-| GET | `/api/v1/assets/{domain}` | Get one asset's full details |
+|--------|----------|-------------|
+| GET | `/api/v1/assets/` | List assets with filters |
+| GET | `/api/v1/assets/stats` | Count by interest level |
 
-**Query parameters for listing:**
+Query parameters:
 
 | Parameter | Type | Description |
-|---|---|---|
-| `program_id` | string | **Required.** Filter by program |
+|-----------|------|-------------|
+| `program_id` | string | **Required** |
 | `interest_level` | string | `critical`, `high`, `medium`, `low`, `noise` |
 | `probe_status` | string | `alive`, `dead`, `not_probed` |
-| `limit` | int | Results per page (default: 100, max: 1000) |
-| `skip` | int | Offset for pagination |
+| `limit` | int | Default: 100, max: 1000 |
+| `skip` | int | Pagination offset |
 
 ```bash
-# All alive HIGH/CRITICAL assets for shopify_h1
-curl "http://localhost:8000/api/v1/assets/?program_id=shopify_h1&interest_level=high&probe_status=alive" \
-  -H "X-API-Key: zp_your_key"
+curl "http://localhost:8000/api/v1/assets/?program_id=shopify_h1&interest_level=critical&probe_status=alive" \
+  -H "X-API-Key: zp_..."
 
-# Asset statistics
 curl "http://localhost:8000/api/v1/assets/stats?program_id=shopify_h1" \
-  -H "X-API-Key: zp_your_key"
+  -H "X-API-Key: zp_..."
 ```
 
 ---
@@ -201,151 +131,163 @@ curl "http://localhost:8000/api/v1/assets/stats?program_id=shopify_h1" \
 ### Findings (Nuclei)
 
 | Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/v1/findings/` | List findings (filterable) |
+|--------|----------|-------------|
+| GET | `/api/v1/findings/` | List findings |
 | GET | `/api/v1/findings/stats/summary` | Count by severity |
-| GET | `/api/v1/findings/{finding_id}` | Full finding with raw request/response PoC |
+| GET | `/api/v1/findings/{finding_id}` | Full finding with raw PoC |
 
-**Query parameters:**
+Query parameters:
 
 | Parameter | Type | Description |
-|---|---|---|
+|-----------|------|-------------|
 | `program_id` | string | **Required** |
 | `severity` | string | `critical`, `high`, `medium`, `low`, `info` |
 | `is_new` | bool | Only unreviewed findings |
 | `limit` | int | Default: 50, max: 500 |
-| `skip` | int | Pagination offset |
+| `skip` | int | Offset |
 
 ```bash
-# New critical/high findings
 curl "http://localhost:8000/api/v1/findings/?program_id=shopify_h1&severity=critical&is_new=true" \
-  -H "X-API-Key: zp_your_key"
+  -H "X-API-Key: zp_..."
 
-# Full PoC for a specific finding (includes raw HTTP request/response)
-curl "http://localhost:8000/api/v1/findings/abc123def456..." \
-  -H "X-API-Key: zp_your_key"
+# Full PoC (includes raw HTTP request/response)
+curl "http://localhost:8000/api/v1/findings/abc123..." -H "X-API-Key: zp_..."
 
-# Severity breakdown
 curl "http://localhost:8000/api/v1/findings/stats/summary?program_id=shopify_h1" \
-  -H "X-API-Key: zp_your_key"
+  -H "X-API-Key: zp_..."
 ```
 
 ---
 
-### GitHub Leaks (OSINT)
+### GitHub Leaks
 
 | Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/v1/leaks/` | List leaked credentials found on GitHub |
+|--------|----------|-------------|
+| GET | `/api/v1/leaks/` | List GitHub OSINT leaks |
 | GET | `/api/v1/leaks/stats` | Count by severity |
 
-**Query parameters:**
-
-| Parameter | Type | Description |
-|---|---|---|
-| `program_id` | string | **Required** |
-| `severity` | string | `critical`, `high`, `info` |
-| `match_type` | string | `aws_access_key`, `env_file`, `password`, etc. |
-| `is_new` | bool | Only unseen leaks |
-| `limit` | int | Default: 50, max: 500 |
-
 ```bash
-# Critical leaks only
 curl "http://localhost:8000/api/v1/leaks/?program_id=shopify_h1&severity=critical" \
-  -H "X-API-Key: zp_your_key"
+  -H "X-API-Key: zp_..."
 
-# New .env file exposures specifically
 curl "http://localhost:8000/api/v1/leaks/?program_id=shopify_h1&match_type=env_file&is_new=true" \
-  -H "X-API-Key: zp_your_key"
+  -H "X-API-Key: zp_..."
 ```
 
 ---
 
-## 6. Python Client Example
+### Port Findings
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/portfindings/` | List port scan results |
+| GET | `/api/v1/portfindings/stats` | Count by severity + top services |
+| GET | `/api/v1/portfindings/critical` | CRITICAL exposed services only |
+| GET | `/api/v1/portfindings/{finding_id}` | Single port finding |
+
+```bash
+curl "http://localhost:8000/api/v1/portfindings/?program_id=shopify_h1&severity=critical" \
+  -H "X-API-Key: zp_..."
+
+# CRITICAL only — unauthenticated Redis, MongoDB, Docker API, Elasticsearch
+curl "http://localhost:8000/api/v1/portfindings/critical?program_id=shopify_h1" \
+  -H "X-API-Key: zp_..."
+```
+
+---
+
+### Google Dork Results
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/dorks/` | List dork results |
+| GET | `/api/v1/dorks/stats` | Count by severity and category |
+| GET | `/api/v1/dorks/exposed-files` | `.env`, `.sql`, backup files |
+| GET | `/api/v1/dorks/{result_id}` | Single dork result |
+
+```bash
+curl "http://localhost:8000/api/v1/dorks/?program_id=shopify_h1&severity=critical" \
+  -H "X-API-Key: zp_..."
+
+curl "http://localhost:8000/api/v1/dorks/exposed-files?program_id=shopify_h1" \
+  -H "X-API-Key: zp_..."
+```
+
+---
+
+## 5. Python Client Example
 
 ```python
 import httpx
 
-BASE = "http://localhost:8000/api/v1"
-API_KEY = "zp_your_key_here"
-HEADERS = {"X-API-Key": API_KEY}
+BASE    = "http://localhost:8000/api/v1"
+HEADERS = {"X-API-Key": "zp_your_key"}
 
-# Get all critical findings
-resp = httpx.get(
+# Critical findings
+findings = httpx.get(
     f"{BASE}/findings/",
     params={"program_id": "shopify_h1", "severity": "critical"},
     headers=HEADERS,
-)
-findings = resp.json()["findings"]
+).json()["findings"]
 
 for f in findings:
     print(f"{f['severity'].upper()} | {f['template_id']} | {f['matched_at']}")
+
+# CRITICAL exposed ports
+ports = httpx.get(
+    f"{BASE}/portfindings/critical",
+    params={"program_id": "shopify_h1"},
+    headers=HEADERS,
+).json()["findings"]
+
+for p in ports:
+    print(f"{p['ip']}:{p['port']} — {p['service']} — {p['reason']}")
 ```
 
 ---
 
-## 7. Multi-Tenancy (SaaS Mode)
+## 6. Multi-Tenancy (SaaS Mode)
 
-Every document in every collection has a `tenant_id` field. For personal use it's always `"default"`. When you onboard a client, create a tenant record with their own API key:
+Every document has a `tenant_id` field. For personal use it's always `"default"`. To onboard a client:
 
 ```python
-# One-time setup per client (run in Python shell or a provisioning script)
-import asyncio
-import hashlib, secrets
+import asyncio, hashlib, secrets
 import motor.motor_asyncio
 from config import settings
 
 async def create_tenant(tenant_id: str, name: str):
-    client = motor.motor_asyncio.AsyncIOMotorClient(settings.MONGODB_URI)
-    db = client[settings.MONGODB_DB]
-
+    client  = motor.motor_asyncio.AsyncIOMotorClient(settings.MONGODB_URI)
+    db      = client[settings.MONGODB_DB]
     raw_key = f"zp_{secrets.token_urlsafe(32)}"
-    hashed  = hashlib.sha256(raw_key.encode()).hexdigest()
-
     await db["tenants"].insert_one({
         "tenant_id":    tenant_id,
         "name":         name,
-        "api_key_hash": hashed,
+        "api_key_hash": hashlib.sha256(raw_key.encode()).hexdigest(),
         "is_active":    True,
         "plan":         "professional",
     })
-    print(f"Tenant: {tenant_id}")
-    print(f"API Key: {raw_key}")
+    print(f"API Key for {tenant_id}: {raw_key}")
     client.close()
 
 asyncio.run(create_tenant("acme_corp", "Acme Corporation"))
 ```
 
-Once created, that tenant's API key authenticates them and automatically scopes every query to their data only. They cannot see your programs or any other tenant's data.
+Each tenant's API key scopes every query to their data only — they cannot see other tenants' programs, assets, or findings.
 
 ---
 
-## 8. Config Reference
-
-All API settings go in `.env`:
+## 7. `.env` Config Reference
 
 ```env
 # API server
 API_HOST=0.0.0.0
 API_PORT=8000
-API_SECRET_KEY=change-me-to-something-secret-in-production
-API_TOKEN_EXPIRE_MINUTES=1440          # JWT TTL — 24h default
-API_CORS_ORIGINS=http://localhost:3000  # Allowed dashboard origins
+API_SECRET_KEY=change-me-before-exposing-to-network   # signs all JWTs
+API_TOKEN_EXPIRE_MINUTES=1440                          # JWT TTL — 24h
+API_CORS_ORIGINS=http://localhost:3000                 # dashboard origin
 
-# Your personal API key
+# Personal API key
 ZEROPOINT_API_KEY=zp_your_key_here
 ```
 
-**Important:** Change `API_SECRET_KEY` before exposing the server to a network. This key signs all JWTs — anyone with it can forge tokens.
-
----
-
-## 9. About the Auto-Generated Docs
-
-FastAPI builds the Swagger UI and OpenAPI schema automatically from:
-- **Route decorators** (`@router.get(...)`, `@router.post(...)`)
-- **Pydantic models** used as request bodies and responses
-- **Docstrings** on route functions
-- **Parameter type hints** and `Query(...)` annotations
-
-You don't write separate documentation. When you add a new endpoint, it appears in Swagger immediately. The schema at `/api/openapi.json` can also be imported into Postman or any API testing tool.
+> **Security**: Change `API_SECRET_KEY` before exposing the server to any network. Anyone with this key can forge JWT tokens.

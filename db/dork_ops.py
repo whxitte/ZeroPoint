@@ -117,16 +117,18 @@ async def upsert_dork_result(result: DorkResult) -> bool:
         raise
 
 
-async def mark_results_notified(result_ids: List[str]) -> None:
-    """Flip is_new=False after alerts dispatched."""
+async def mark_results_notified(result_ids: List[str], suppress_days: int = 7) -> None:
+    """Flip is_new=False and set suppress_until after alerts dispatched."""
     if not result_ids:
         return
-    col = get_results_col()
+    from datetime import timedelta
+    col         = get_results_col()
+    suppress_ts = datetime.now(timezone.utc) + timedelta(days=suppress_days)
     await col.update_many(
         {"result_id": {"$in": result_ids}},
-        {"$set": {"is_new": False}},
+        {"$set": {"is_new": False, "suppress_until": suppress_ts}},
     )
-    logger.debug(f"[dork] Marked {len(result_ids)} result(s) notified")
+    logger.debug(f"[dork] Marked {len(result_ids)} item(s) notified | suppress_until={suppress_ts.date()}")
 
 
 async def get_dork_stats(program_id: str) -> dict:

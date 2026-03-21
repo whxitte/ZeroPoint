@@ -1,7 +1,4 @@
 # ZeroPoint — Enterprise Bug Bounty Automation Framework
-### Module 1: The Ingestion Engine
-
----
 
 ```
  ______               ____        _       _
@@ -13,494 +10,663 @@
                   State-Aware Recon Engine
 ```
 
-## Architecture Overview
+An autonomous, modular bug bounty pipeline that discovers assets, fingerprints infrastructure, detects vulnerabilities, and alerts you in real time — for $0 infrastructure cost.
+
+---
+
+## What ZeroPoint Does
+
+Every hour it finds new subdomains. Every 2 hours it probes them. Every 6 hours it runs Nuclei and searches GitHub for leaked credentials. Every 12 hours it crawls endpoints and extracts JS secrets. Every 24 hours it scans open ports and finds Google-indexed exposures. It alerts via Discord/Telegram the moment anything new is found — and never re-alerts for the same finding within 7 days.
+
+---
+
+## Architecture
 
 ```
-ingestor.py (Orchestrator)
-    │
-    ├─► modules/recon.py          ← asyncio.gather runs all tools in parallel
-    │       ├── Subfinder          (subprocess, JSON output)
-    │       ├── crt.sh             (aiohttp, CT logs)
-    │       └── Shodan             (SDK in executor, DNS API)
-    │
-    ├─► db/mongo.py               ← Motor async driver, state-tracking upserts
-    │       ├── ensure_indexes()
-    │       ├── upsert_asset()     ← THE core state logic (is_new flag)
-    │       └── bulk_upsert_assets()
-    │
-    └─► core/alerts.py            ← Discord + Telegram notifications
-            └── notify_new_assets() ← fires ONLY on is_new=True assets
+run.py  ← Single entry point: manual one-shot or 24/7 daemon
+   │
+   ├── Module 1  ingestor.py      Subdomain discovery
+   │              ├── Subfinder   (subprocess, JSON)
+   │              ├── crt.sh      (aiohttp, CT logs)
+   │              └── Shodan      (SDK in thread executor)
+   │
+   ├── Module 2  prober.py        HTTP probe & fingerprint
+   │              └── httpx       (subprocess, JSONL stream)
+   │                  └── FingerprintClassifier → CRITICAL/HIGH/MEDIUM/LOW/NOISE
+   │
+   ├── Module 3  scanner.py       Vulnerability scanner
+   │              └── Nuclei      (subprocess, JSONL stream)
+   │                  └── Tech stack → smart template tag selection
+   │
+   ├── Module 4  crawler.py       Endpoint & secret discovery
+   │              ├── Katana      (active crawl, JS-aware)
+   │              ├── waybackurls (historical URLs)
+   │              ├── gau         (AlienVault + Wayback + CommonCrawl)
+   │              └── JS Analyzer (25 regex patterns + SecretFinder)
+   │
+   ├── Module 5  run.py           Pipeline orchestrator
+   │              ├── Manual mode  (one-shot, any subset of modules)
+   │              └── Daemon mode  (independent async loop per module)
+   │
+   ├── Module 6  github_osint.py  GitHub credential scanner
+   │              └── 40+ dork queries → leaked .env, passwords, API keys
+   │
+   ├── Module 7  port_scanner.py  Port & service discovery
+   │              ├── Masscan     (fast sweep, CIDR-aware)
+   │              └── Nmap        (service fingerprint, banner grab)
+   │
+   ├── Module 8  google_dork.py   Google-indexed exposure finder
+   │              └── Custom Search API → .env files, SQL dumps, admin panels
+   │
+   ├── Module 9  asn_mapper.py    Company IP range discovery
+   │              └── BGPView API → IP → ASN → all CIDR prefixes
+   │
+   ├── report.py                  Tabbed HTML report generator
+   └── serve.py                   REST API server (FastAPI)
 ```
 
-## The State Tracking Secret
+### State-Tracking Core
 
-Every discovered subdomain goes through this upsert logic:
+Every subdomain upsert follows this logic:
 
 ```
 domain found?
-├── NO  → Insert: is_new=True, status="new", first_seen=NOW
-│                 ↳ TRIGGERS notification to Discord/Telegram
-└── YES → Update: is_new=False, status="active", last_seen=NOW
-                  ↳ No noise. Silent update.
+├── NO  → Insert: is_new=True, first_seen=NOW
+│                 ↳ Fires Discord/Telegram alert immediately
+└── YES → Update: last_seen=NOW (silent — no duplicate alert)
 
-A "Net new assets: 0" in the ingester's summary means all discovered domains already existed in the database and were updated, not newly inserted.
+Finding alerted?
+└── mark_*_notified() sets suppress_until = now + 7 days
+    ↳ Same finding won't re-alert for a full week
 ```
 
-This is what makes ZeroPoint smart — **you only get alerted when something is genuinely new**.
+SHA-256 deduplication keys (`finding_id`, `secret_id`, `leak_id`, etc.) guarantee the same vulnerability can never produce a duplicate DB document or alert across any number of scan runs.
+
+---
+
+## Module Status
+
+| # | Module | File | Default Schedule | What It Finds |
+|---|--------|------|-----------------|---------------|
+| 1 | Ingestion | `ingestor.py` | Every 1h | New subdomains via Subfinder + crt.sh + Shodan |
+| 2 | Prober | `prober.py` | Every 2h | HTTP status, tech stack, interest classification |
+| 3 | Scanner | `scanner.py` | Every 6h | Nuclei vulnerabilities (tech-targeted templates) |
+| 4 | Crawler | `crawler.py` | Every 12h | Endpoints, JS secrets, historical URLs |
+| 5 | Orchestrator | `run.py` | Continuous | Chains all modules, manual + daemon |
+| 6 | GitHub OSINT | `github_osint.py` | Every 6h | Leaked credentials in public repos |
+| 7 | Port Scanner | `port_scanner.py` | Every 24h | Exposed Redis/MongoDB/Docker/K8s/ES |
+| 8 | Google Dork | `google_dork.py` | Every 24h | Indexed .env files, SQL dumps, admin panels |
+| 9 | ASN Mapper | `asn_mapper.py` | Every 24h | Company-owned IP ranges via BGPView |
+| — | Reporter | `report.py` | On demand | Tabbed HTML report across all collections |
+| — | API Server | `serve.py` | On demand | REST API for dashboards and integrations |
 
 ---
 
 ## Quick Start
 
-### 1. Prerequisites
+### 1. Install Go Tools
 
 ```bash
-# Install Go tools
 go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 go install github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-nuclei -update-templates   # pulls ~/.nuclei-templates automatically
-
 go install github.com/projectdiscovery/katana/cmd/katana@latest
 go install github.com/tomnomnom/waybackurls@latest
 go install github.com/lc/gau/v2/cmd/gau@latest
-
-sudo apt install masscan nmap
-
-# Optional but recommended — SecretFinder
-git clone https://github.com/m4ll0k/SecretFinder.git /opt/SecretFinder
-pip install jsbeautifier requests
-
-# Install Python deps
-pip install -r requirements.txt
+nuclei -update-templates
 ```
 
-### 2. Configure
+### 2. System Tools
+
+```bash
+sudo apt install masscan nmap
+
+# Allow masscan without sudo (run once)
+sudo setcap cap_net_raw+ep $(which masscan)
+```
+
+### 3. Python Environment
+
+```bash
+git clone https://github.com/whxitte/ZeroPoint.git
+cd ZeroPoint
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Optional but recommended: SecretFinder for deeper JS analysis
+git clone https://github.com/m4ll0k/SecretFinder.git /opt/SecretFinder
+pip install jsbeautifier requests lxml
+```
+
+### 4. Configure `.env`
 
 ```bash
 cp .env.example .env
-# Edit .env — set MONGODB_URI, SHODAN_API_KEY, DISCORD_WEBHOOK_URL, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-
-# --- API Keys and Notification Setup ---
-# SHODAN_API_KEY: Obtain from shodan.io. Required for Shodan module.
-# DISCORD_WEBHOOK_URL: Create a webhook in your Discord server settings. Ensure it's a valid webhook URL.
-# TELEGRAM_BOT_TOKEN:
-#   1. Talk to @BotFather on Telegram, send /newbot, and follow instructions.
-#   2. BotFather will give you an HTTP API token (e.g., 123456:ABC-DEF...).
-# TELEGRAM_CHAT_ID:
-#   1. Start a conversation with your new bot.
-#   2. In your web browser, go to https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
-#      (replace <YOUR_BOT_TOKEN> with your bot's token).
-#   3. Look for "chat":{"id":...}. The number is your TELEGRAM_CHAT_ID.
-#   (For group/channel IDs, add the bot to the group/channel, send a message, then check getUpdates. IDs are often negative).
-
-# --- Advanced Reconnaissance Settings ---
-# CRTSH_TIMEOUT: (default: 60) Timeout for crt.sh queries. Increased from default to handle slow responses.
-# crt.sh Retries: (Automatic) The system automatically retries crt.sh requests on 429 (rate limit), 404 (not found), and 503 (service unavailable) HTTP errors with exponential back-off, enhancing resilience.
-
-# --- Subfinder Configuration (Optional but Recommended) ---
-# To enhance subdomain discovery, configure API keys for various services
-# that Subfinder integrates with.
-# For example, create a ~/.config/subfinder/provider-config.yaml file:
 ```
 
-### 3. Seed your first program
+Minimum required settings:
+
+```env
+# MongoDB Atlas free tier (https://cloud.mongodb.com)
+MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/?retryWrites=true&w=majority
+MONGODB_DB=zeropoint
+
+# At least one notification channel
+TELEGRAM_BOT_TOKEN=123456:ABC...
+TELEGRAM_CHAT_ID=-1001234567890
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+
+# Required for Module 1 (Shodan) and Module 6 (GitHub OSINT)
+SHODAN_API_KEY=your_key
+GITHUB_TOKEN=ghp_your_token   # needs public_repo scope
+```
+
+Optional:
+```env
+# Module 8 — Google Dork (100 free queries/day)
+GOOGLE_API_KEY=AIzaSy...
+GOOGLE_CSE_ID=abc123...
+
+# Module 4 — Deeper JS analysis
+SECRETFINDER_PATH=/opt/SecretFinder/SecretFinder.py
+```
+
+### 5. Seed Your First Program
 
 ```bash
-# Seed a private program
-python ingestor.py --seed-program example.com --program-id my_target
+python3 seed_programs.py
 
-# Seed from a public platform
-python ingestor.py \
-  --seed-program target.com \
-  --program-id h1_target \
-  --platform hackerone \
-  --program-name "Target VRP"
+# Or via CLI:
+python3 ingestor.py --seed-program target.com --program-id target_h1 --platform hackerone
 ```
 
-### 4. Run
+---
+
+## Running ZeroPoint
+
+### Manual One-Shot
 
 ```bash
-# Run against all active programs
-python ingestor.py
+# Full 9-module pipeline for one program
+python3 run.py --program-id target_h1
 
-# Run against one specific program
-python ingestor.py --program-id my_target
+# Specific modules
+python3 run.py --program-id target_h1 --modules ingest,probe,scan
 
-# Seed AND immediately run
-python ingestor.py --seed-program example.com --program-id my_target --run-after-seed
+# Skip modules
+python3 run.py --program-id target_h1 --skip crawl,dork
+
+# Force re-run (ignore all rescan intervals)
+python3 run.py --program-id target_h1 --force
+
+# Preview what would run without executing
+python3 run.py --program-id target_h1 --dry-run
+
+# All active programs
+python3 run.py
 ```
 
-
-### 4.1 Probe Targets
+### 24/7 Daemon
 
 ```bash
-python3 prober.py --program-id shopify_h1
+# All programs, all modules on schedule
+python3 run.py --daemon
 
-# Force re-probe target: Ignores last_probed timestamp and probe_status conditions to re-scan all assets.
-python3 prober.py --program-id shopify_h1 --force
+# Single program only
+python3 run.py --daemon --program-id target_h1
+
+# Custom intervals (seconds)
+python3 run.py --daemon --ingest-interval 1800 --scan-interval 3600
 ```
 
-### 4.2 Scan Targets
+Each module runs on its own independent async timer — a slow 4-hour crawl never delays the next hourly ingestion run.
+
+### Individual Module CLI (Recommended First-Time Order)
 
 ```bash
-# Module 3 — scan all CRITICAL/HIGH assets for a specific program
-python3 scanner.py --program-id shopify_h1
-
-# Module 3 — scan all active programs in DB
-python3 scanner.py
-
-# Module 3 — force rescan everything (ignores the 72h rescan interval)
-python3 scanner.py --program-id shopify_h1 --force
-
-# Module 3 — override severity for this run only
-python3 scanner.py --program-id shopify_h1 --severity critical,high
-
-# Module 3 — quick test on a single domain (no DB write, still fires alerts)
-python3 scanner.py --domain juice-shop.herokuapp.com --severity critical,high,medium
+python3 ingestor.py --program-id target_h1      # discover subdomains
+python3 prober.py   --program-id target_h1      # probe + fingerprint
+python3 scanner.py  --program-id target_h1      # Nuclei vuln scan
+python3 crawler.py  --program-id target_h1      # crawl endpoints + JS
+python3 github_osint.py --program-id target_h1  # search GitHub for leaks
+python3 asn_mapper.py   --program-id target_h1  # map company IP ranges
+python3 port_scanner.py --program-id target_h1  # scan open ports
+python3 google_dork.py  --program-id target_h1  # find indexed exposures
+python3 report.py       --program-id target_h1  # generate HTML report
 ```
+
+### Quick Single-Target Tests (No DB Write)
+
+```bash
+python3 prober.py      --domain target.com
+python3 scanner.py     --domain target.com --severity critical,high,medium
+python3 crawler.py     --domain target.com
+python3 github_osint.py --domain target.com
+python3 asn_mapper.py  --domain target.com
+python3 port_scanner.py --ip 1.2.3.4
+python3 google_dork.py  --domain target.com
+```
+
+---
+
+## HTML Report
+
+Generates a self-contained dark-theme HTML file with clickable tabs:
+
+```bash
+python3 report.py --program-id target_h1
+# → reports/target_h1_20260322_1430.html
+
+python3 report.py --program-id target_h1 --new-only        # unreviewed only
+python3 report.py --program-id target_h1 --severity critical,high
+```
+
+The tab bar lets you filter instantly:
+
+- **ALL** — complete overview (default)
+- **Critical / High / Medium** — severity filter across all modules
+- **Vulns / JS Secrets / GH Leaks / Dork Hits / Open Ports / Endpoints** — per-module view
+
+Press `Escape` to clear any active filter.
+
+---
+
+## REST API
+
+```bash
+python3 serve.py
+# → Swagger UI at http://localhost:8000/api/docs
+# → ReDoc at http://localhost:8000/api/redoc
+
+python3 get_api_key.py   # print/rotate your API key
+```
+
+All endpoints require `X-API-Key: zp_...` or `Authorization: Bearer <jwt>`.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/auth/token` | Exchange API key for JWT |
+| GET | `/api/v1/programs/` | List programs |
+| GET | `/api/v1/assets/?program_id=X` | List assets |
+| GET | `/api/v1/assets/stats` | Asset counts by interest level |
+| GET | `/api/v1/findings/?program_id=X` | Nuclei findings |
+| GET | `/api/v1/findings/{id}` | Full finding with raw PoC |
+| GET | `/api/v1/leaks/?program_id=X` | GitHub leaks |
+| GET | `/api/v1/portfindings/?program_id=X` | Port scan results |
+| GET | `/api/v1/portfindings/critical` | CRITICAL exposed services only |
+| GET | `/api/v1/dorks/?program_id=X` | Google dork results |
+| GET | `/api/v1/health` | DB connectivity check |
+
 ---
 
 ## Directory Structure
 
 ```
-zeropoint/
-├── .env.example                      ← Template for secrets
-├── .env                              ← Your actual secrets (git-ignored)
-├── requirements.txt
-├── config.py                         ← All settings via pydantic-settings
-├── models.py                         ← Pydantic schemas (Asset, Program, ...)
-├── ingestor.py                       ← CLI entry point + orchestrator
+ZeroPoint/
+├── config.py             ← All settings (pydantic-settings + .env)
+├── models.py             ← Pydantic v2 schemas for all 9 modules
 │
-├── db/
-│   ├── __init__.py
-│   └── mongo.py                      ← All MongoDB/Motor operations
+├── ingestor.py           ← Module 1
+├── prober.py             ← Module 2
+├── scanner.py            ← Module 3
+├── crawler.py            ← Module 4
+├── run.py                ← Module 5 (orchestrator + daemon)
+├── github_osint.py       ← Module 6
+├── port_scanner.py       ← Module 7
+├── google_dork.py        ← Module 8
+├── asn_mapper.py         ← Module 9
 │
-├── modules/
-│   ├── __init__.py
-│   └── recon.py                      ← Subfinder, crt.sh, Shodan wrappers
+├── report.py             ← HTML report generator
+├── serve.py              ← FastAPI server
+├── seed_programs.py      ← Program setup utility
+├── get_api_key.py        ← API key management
+│
+├── modules/              ← Tool wrappers
+│   ├── recon.py          (Subfinder, crt.sh, Shodan)
+│   ├── prober.py         (httpx)
+│   ├── nuclei.py         (Nuclei)
+│   ├── crawler.py        (Katana, waybackurls, gau)
+│   ├── js_analyzer.py    (regex + SecretFinder)
+│   ├── github_osint.py   (GitHub Search API)
+│   ├── port_scanner.py   (Masscan + Nmap)
+│   ├── dorker.py         (Google/Brave/SerpAPI)
+│   └── asn_mapper.py     (BGPView)
 │
 ├── core/
-│   ├── __init__.py
-│   └── alerts.py                     ← Discord + Telegram notifications
+│   ├── alerts.py         (Discord + Telegram dispatchers)
+│   ├── fingerprint.py    (Interest level classifier)
+│   └── endpoint_classifier.py (Shannon entropy + URL rules)
 │
-└── logs/
-    └── zeropoint.log                 ← Rotating logs (auto-created)
+├── db/
+│   ├── mongo.py          (Core: programs, assets, findings indexes)
+│   ├── scanner_ops.py    (Module 3 DB ops)
+│   ├── crawler_ops.py    (Module 4 DB ops)
+│   ├── github_ops.py     (Module 6 DB ops)
+│   ├── portscan_ops.py   (Module 7 DB ops)
+│   ├── dork_ops.py       (Module 8 DB ops)
+│   └── asn_ops.py        (Module 9 DB ops)
+│
+├── api/
+│   ├── main.py           (FastAPI app + rate limiting)
+│   ├── auth.py           (JWT + API key auth)
+│   ├── deps.py           (Shared dependencies)
+│   └── routes/           (programs, assets, findings, leaks, ports, dorks)
+│
+├── tests/
+│   ├── test_ingestion.py
+│   ├── test_prober.py
+│   ├── test_scanner.py
+│   └── test_crawler.py
+│
+├── reports/              ← Generated HTML reports
+└── logs/                 ← Rotating log files
 ```
 
 ---
 
-## MongoDB Schema
+## MongoDB Collections
 
-### `assets` collection
-
-| Field            | Type       | Description                                   |
-|------------------|------------|-----------------------------------------------|
-| `domain`         | string     | **Unique PK** — the discovered subdomain      |
-| `program_id`     | string     | Parent program reference                      |
-| `sources`        | array      | `["subfinder", "crtsh", "shodan"]`            |
-| `ip_addresses`   | array      | Resolved IPs (from Shodan)                    |
-| `is_new`         | boolean    | **True only on first insertion** — alert flag |
-| `status`         | string     | `new` / `active` / `stale`                    |
-| `first_seen`     | datetime   | Set-on-insert, never overwritten              |
-| `last_seen`      | datetime   | Updated on every run                          |
-| `http_status`    | int        | Populated by httpx module (Module 2)          |
-| `technologies`   | array      | Populated by httpx module (Module 2)          |
-| `open_ports`     | array      | Populated by httpx module (Module 2)          |
-
-### `programs` collection
-
-| Field        | Type     | Description                          |
-|--------------|----------|--------------------------------------|
-| `program_id` | string   | Unique slug, e.g. `hackerone_google` |
-| `name`       | string   | Human-readable name                  |
-| `platform`   | string   | `hackerone`, `bugcrowd`, etc.        |
-| `domains`    | array    | Root in-scope domains                |
-| `wildcards`  | array    | Wildcard entries, e.g. `*.target.com`|
-| `is_active`  | boolean  | Controls whether engine processes it |
+| Collection | Dedup Key | What's Stored |
+|------------|-----------|---------------|
+| `programs` | `program_id` | Bug bounty program config |
+| `assets` | `domain` | Every subdomain + probe data + interest level |
+| `findings` | `sha256(template+domain+matched_at)` | Nuclei vulnerability findings |
+| `endpoints` | `sha256(domain+url_path)` | Crawled interesting URLs |
+| `secrets` | `sha256(type+domain+value[:32])` | JS secrets and credentials |
+| `github_leaks` | `sha256(repo+file+type+value[:32])` | GitHub OSINT results |
+| `port_findings` | `sha256(ip+port+protocol)` | Open ports and services |
+| `dork_results` | `sha256(domain+category+url[:80])` | Google dork results |
+| `asn_info` | `(program_id, asn_number)` | Company ASNs and IP prefixes |
+| `tenants` | `tenant_id` | API key hashes (multi-tenant SaaS) |
 
 ---
 
-## Pipeline Roadmap
+## Notification System
 
-| Module | Status | Description                              |
-|--------|--------|------------------------------------------|
-| 1      | ✅ Done | Ingestion Engine (this module)           |
-| 2      | 🔜 Next | Enrichment Engine (httpx fingerprinting) |
-| 3      | 🔜     | Vuln Scanner (Nuclei, Dalfox)            |
-| 4      | 🔜     | JS Harvester (Katana, SecretFinder)      |
-| 5      | 🔜     | Scheduler (APScheduler / Celery)         |
+Both Discord (rich embeds) and Telegram (HTML) receive every alert simultaneously.
 
----
+| Event | Trigger |
+|-------|---------|
+| New subdomain | First-ever discovery of a domain |
+| CRITICAL/HIGH asset | Prober classifies a target as high-value |
+| Nuclei finding | Every new unique vulnerability (all severities) |
+| JS secret | Every new credential found in JavaScript |
+| GitHub leak | Every new leaked credential in a public repo |
+| Exposed port | Every new CRITICAL/HIGH port finding |
+| Dork finding | Every new CRITICAL/HIGH Google-indexed exposure |
+| End-of-run summaries | After each module completes a run |
 
-## Quick reference
-
-| Intent | Command |
-|--------|---------|
-| Run all active programs	      | python3 ingestor.py |
-| Run a specific program	      | python3 ingestor.py --program-id <program-id> |
-| Seed a new program	      | python3 ingestor.py --seed-program <program-name> |
-| Seed and run immediately	      | python3 ingestor.py --seed-program <program-name> --run-after-seed |
-| Force re-probe a program    | python3 prober.py --program-id <program-id> --force |
+**7-day suppression**: After alerting, `suppress_until = now + 7 days` is set. The same finding is silently skipped until the window expires, preventing alert floods.
 
 ---
 
-## Coding Standards
+## Google Dork Setup (Module 8)
 
-- **Pydantic v2** for all data schemas — malformed data is rejected at the boundary
-- **Loguru** for structured, rotated logs — no bare `print()` anywhere
-- **Type hints** on every function signature
-- **Motor** (not PyMongo) for all DB I/O — fully async, never blocks the event loop
-- **Asyncio.gather** for parallel tool execution
-- **Semaphore** to bound concurrency — prevents WAF bans
-- **Jitter** on all network requests — randomises timing signatures
-- **Modular design** — swap any tool wrapper without touching other modules
+1. [console.cloud.google.com](https://console.cloud.google.com) → enable **Custom Search API** → create API key
+2. [cse.google.com/cse](https://cse.google.com/cse) → create engine → **Search the entire web** → copy `cx` ID
+3. Add to `.env`:
+   ```env
+   GOOGLE_API_KEY=AIzaSy...
+   GOOGLE_CSE_ID=abc123...
+   ```
+
+Free tier: 100 queries/day. Alternatives: SerpAPI (100/month free), Brave Search ($5 free credit).
 
 ---
 
-### Full three-module pipeline — complete reference
+## Subfinder API Keys (Boosts Module 1)
+
+More keys = more subdomains. Create `~/.config/subfinder/provider-config.yaml`:
+
+```yaml
+shodan:
+  - YOUR_SHODAN_API_KEY
+github:
+  - YOUR_GITHUB_TOKEN
+virustotal:
+  - YOUR_VT_KEY
+censys:
+  - YOUR_CENSYS_ID:YOUR_CENSYS_SECRET
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  MODULE 1 — Ingestion (find subdomains)                         │
-│  python3 ingestor.py --program-id shopify_h1                    │
-│                                                                 │
-│  What it does:                                                  │
-│    • Runs Subfinder, crt.sh, Shodan in parallel                 │
-│    • Upserts every subdomain into MongoDB `assets`              │
-│    • Sets is_new=True on first-ever seen domains                │
-│    • Fires Discord/Telegram alert for NEW subdomains only       │
-│                                                                 │
-│  MongoDB writes:  assets collection                             │
-│  Alert trigger:   is_new=True (new subdomain discovered)        │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  MODULE 2 — Prober (HTTP probe + fingerprint)                   │
-│  python3 prober.py --program-id shopify_h1                      │
-│                                                                 │
-│  What it does:                                                  │
-│    • Reads probe_status=not_probed assets from DB               │
-│    • Runs httpx in batches, streams JSON results                │
-│    • FingerprintClassifier assigns interest_level               │
-│    • Writes http_status, tech_stack, title, cdn back to DB      │
-│    • Fires alert for CRITICAL/HIGH interest assets              │
-│                                                                 │
-│  MongoDB writes:  assets.probe_status, assets.interest_level    │
-│  Alert trigger:   interest_level = CRITICAL or HIGH             │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  MODULE 3 — Scanner (Nuclei vulnerability scan)                 │
-│  python3 scanner.py --program-id shopify_h1                     │
-│                                                                 │
-│  What it does:                                                  │
-│    • Reads interest_level=HIGH/CRITICAL + probe_status=alive    │
-│    • Groups assets by tech stack, builds targeted template tags │
-│    • Runs Nuclei, streams JSONL findings live                   │
-│    • SHA-256 dedup — same vuln never alerts twice               │
-│    • Writes findings to `findings` collection in MongoDB        │
-│    • Fires immediate alert for EVERY new finding                │
-│    • Sends end-of-run summary digest                            │
-│                                                                 │
-│  MongoDB writes:  findings collection, assets.last_scanned      │
-│  Alert trigger:   every new unique finding (all severities)     │
-└─────────────────────────────────────────────────────────────────┘
-```
----
-### Recommended run order for a program
-```
-# First time setup — seed your target program
-python3 seed_programs.py
 
-# Step 1 — discover all subdomains
-python3 ingestor.py --program-id shopify_h1
-
-# Step 2 — probe and fingerprint everything found
-python3 prober.py --program-id shopify_h1
-
-# Step 3 — scan everything classified as HIGH or CRITICAL
-python3 scanner.py --program-id shopify_h1
-
-# crawl endpoints + find secrets
-python3 crawler.py  --program-id shopify_h1   
-```
 ---
 
-### 24/7 continuous monitoring (cron setup)
-Run all three on a schedule so new assets are automatically discovered, probed, and scanned without you touching anything:
+## Unit Tests
+
 ```bash
-# Edit crontab
-crontab -e
-
-# Add these three lines:
-
-# Module 1 — rediscover subdomains every hour
-0 * * * * cd /home/sethu/PROJECTS/ZeroPoint && python3 ingestor.py >> logs/cron.log 2>&1
-
-# Module 2 — reprobe all assets every 2 hours
-30 */2 * * * cd /home/sethu/PROJECTS/ZeroPoint && python3 prober.py >> logs/cron.log 2>&1
-
-# Module 3 — scan HIGH/CRITICAL assets every 6 hours
-0 */6 * * * cd /home/sethu/PROJECTS/ZeroPoint && python3 scanner.py >> logs/cron.log 2>&1
+pytest tests/ -v                    # all tests
+pytest tests/test_scanner.py -v    # specific module
 ```
----
-### All CLI flags for all three modules
-```
-# ── Module 1 ──────────────────────────────────────────────────
-python3 ingestor.py                              # all active programs
-python3 ingestor.py --program-id shopify_h1      # single program
-python3 ingestor.py --domain shopify.com --program-id shopify_h1  # single domain
 
-# ── Module 2 ──────────────────────────────────────────────────
-python3 prober.py                               # all active programs
-python3 prober.py --program-id shopify_h1       # single program
-python3 prober.py --force                       # re-probe even recently probed assets
-python3 prober.py --domain api.shopify.com      # quick single-domain probe (no DB write)
+All tests are network-free and database-free.
 
-# ── Module 3 ──────────────────────────────────────────────────
-python3 scanner.py                              # all active programs
-python3 scanner.py --program-id shopify_h1      # single program
-python3 scanner.py --force                      # ignore 72h rescan interval
-python3 scanner.py --severity critical,high     # tighten severity filter for this run
-python3 scanner.py --domain target.com          # quick test, no DB write, still alerts
-
-# ── Module 4 ──────────────────────────────────────────────────
-python3 crawler.py --domain example.com             # Quick test on one domain (no DB write)
-python3 crawler.py --program-id shopify_h1          # Crawl a specific program
-python3 crawler.py --program-id shopify_h1 --force  # Force re-crawl (ignore 48h interval)
-python3 crawler.py                                  # All programs
-
-# ── Module 5 ──────────────────────────────────────────────────
-
-python3 run.py --program-id shopify_h1                          # Full pipeline for one program (all 4 modules in sequence)
-python3 run.py                                                  # Full pipeline for ALL programs in DB
-python3 run.py --program-id shopify_h1 --modules ingest,probe   # Specific modules only
-python3 run.py --program-id shopify_h1 --skip scan,crawl        # Skip modules
-python3 run.py --program-id shopify_h1 --force                  # Force re-run (ignore all intervals)
-python3 run.py --program-id shopify_h1 --severity critical,high # Override Nuclei severity for this run
-python3 run.py --program-id shopify_h1 --dry-run                # Preview without executing
-python3 run.py --program-id shopify_h1 --stop-on-error          # Abort pipeline if any module fails
-
-```
 ---
 
-```
-# Module 7 — install tools
-sudo apt install masscan nmap
+## Daily Workflow
 
-# Module 8 — 5-min Google setup (100 free queries/day)
-# 1. console.cloud.google.com → Custom Search API → API key
-# 2. cse.google.com/cse → create engine (search entire web) → get cx ID
-# Add to .env:
-# For brave mode
-# 1. Go to: https://api.search.brave.com/app/dashboard https://brave.com/search/api/
-# 2. Sign up (free) → Add Subscription → Free tier
-# 3. Copy the API key
-
-GOOGLE_API_KEY=AIzaSy...
-GOOGLE_CSE_ID=abc123...
-
-# Test Module 7 (no DB write):
-# This may require sudo privilaages, because masscan need raw socket privileges:
-# sudo -E $(which python3) port_scanner.py --ip 35.213.175.146
-# OR
-# Permanent fix (run once, no more sudo needed):
-# sudo setcap cap_net_raw+ep $(which masscan)
-# Now masscan works without sudo
-
-python3 port_scanner.py --ip 1.2.3.4
-
-# Test Module 8 (no DB write):
-python3 google_dork.py --domain shopify.com
-
-# Run both via orchestrator:
-python3 run.py --program-id shopify_h1 --modules portscan,dork
-
-# Full 8-module daemon:
-python3 run.py --daemon
-```
-
-## Daemon mode — 24/7 autonomous monitoring:
 ```bash
-# Start daemon (all programs, all modules on schedule)
+# Start the daemon — this is all you need
 python3 run.py --daemon
 
-# Daemon for one program only
-python3 run.py --daemon --program-id shopify_h1
+# When an alert fires — investigate that target
+python3 scanner.py --domain flagged.target.com --severity critical,high
 
-# Daemon with custom intervals
-python3 run.py --daemon --ingest-interval 1800 --scan-interval 3600
-
-# Ctrl+C or SIGTERM shuts down cleanly after current module finishes
-```
-
-### How the daemon schedules modules
-
-Each module runs on its own independent timer — a slow crawl never delays the next ingestion:
-```
-Time 0h:   ingest ▶ probe ▶ scan ▶ crawl   ← all run immediately on startup
-Time 1h:   ingest ▶ probe                   ← ingest interval hit
-Time 2h:   ingest ▶ probe                   ← both hit
-Time 6h:   ingest ▶ probe ▶ scan            ← scan interval hit
-Time 12h:  ingest ▶ probe ▶ scan ▶ crawl   ← all hit again
-```
-
-New subdomain discovered at hour 1 → probed at hour 2 → scanned at hour 6 → crawled at hour 12. Maximum time from discovery to first vuln scan: **6 hours**. On a first-come-first-served bug bounty program, that's your competitive edge.
-
-### Full 5-module system — everything you have
-```
-Module 1  ingestor.py  — find subdomains (Subfinder + crt.sh + Shodan)
-Module 2  prober.py    — HTTP probe + fingerprint (httpx)
-Module 3  scanner.py   — vuln scan (Nuclei)
-Module 4  crawler.py   — endpoint discovery + JS secrets (Katana + waybackurls)
-Module 5  run.py       — orchestrates all four, manual + daemon mode
-```
----
-### What you have right now
-A fully autonomous bug bounty pipeline that:
-
-- Discovers subdomains every hour
-- Fingerprints and classifies every asset
-- Runs targeted Nuclei scans on HIGH/CRITICAL assets every 6 hours
-- Crawls endpoints and extracts JS secrets every 12 hours
-- Alerts you on Discord and Telegram the moment anything new is found
-- Never alerts twice for the same finding (SHA-256 dedup across all modules)
-- Runs 24/7 with a single command: python3 run.py --daemon
----
-### daily workflow from here
-```bash
-# Start the 24/7 daemon — this is all you need
-python3 run.py --daemon
-
-# When you see an alert — manually investigate that specific asset
-python3 scanner.py --domain flagged-asset.example.com --severity critical,high
-
-# Add a new program
+# Add a new program and immediately run everything
 python3 ingestor.py --seed-program newprogram.com --program-id newprog_h1
-python3 run.py --program-id newprog_h1  # immediate full pipeline run
+python3 run.py --program-id newprog_h1 --force
+
+# Generate a submission-ready report
+python3 report.py --program-id newprog_h1
+# → Open reports/newprog_h1_*.html in browser
 ```
 
 ---
 
-### SaaS Archetecture
+## All CLI Flags — Complete Reference
 
-serve.py — New file. Launches the REST API server:
+### Module 1 — Ingestion (`ingestor.py`)
 ```bash
-python3 serve.py                  # http://localhost:8000/api/docs
-python3 serve.py --reload         # dev mode with hot-reload
-python3 serve.py --port 9000      # custom port
+python3 ingestor.py                                        # all active programs
+python3 ingestor.py --program-id shopify_h1               # single program
+python3 ingestor.py --seed-program example.com \
+  --program-id my_target --platform hackerone \
+  --program-name "Example Corp" --run-after-seed          # seed + run immediately
 ```
 
-### All modules till now
+### Module 2 — Prober (`prober.py`)
+```bash
+python3 prober.py                                          # all active programs
+python3 prober.py --program-id shopify_h1                 # single program
+python3 prober.py --program-id shopify_h1 --force         # re-probe even recent assets
+python3 prober.py --domain api.shopify.com                 # quick test (no DB write)
+```
 
-- Module 1 — Ingestion (Subfinder + crt.sh + Shodan)
-- Module 2 — Prober (httpx fingerprinting + interest classification)
-- Module 3 — Scanner (Nuclei targeted vuln scan)
-- Module 4 — Crawler (Katana + Wayback + GAU + JS secret analysis)
-- Module 5 — Orchestrator (manual + 24/7 daemon, all 8 modules)
-- Module 6 — GitHub OSINT (credential leak detection)
-- Module 7 — Port Scanner (Masscan + Nmap)
-- Module 8 — Google Dork Engine (SerpAPI/Brave/Google)
-- SaaS API (FastAPI + JWT + multi-tenant)
+### Module 3 — Scanner (`scanner.py`)
+```bash
+python3 scanner.py                                         # all active programs
+python3 scanner.py --program-id shopify_h1                # single program
+python3 scanner.py --program-id shopify_h1 --force        # ignore 72h rescan interval
+python3 scanner.py --program-id shopify_h1 --severity critical,high
+python3 scanner.py --domain juice-shop.herokuapp.com \
+  --severity critical,high,medium                          # quick test (no DB write, alerts fire)
+```
+
+### Module 4 — Crawler (`crawler.py`)
+```bash
+python3 crawler.py                                         # all active programs
+python3 crawler.py --program-id shopify_h1                # single program
+python3 crawler.py --program-id shopify_h1 --force        # ignore 48h recrawl interval
+python3 crawler.py --domain gitlab.com                     # quick test (no DB write)
+```
+
+### Module 5 — Orchestrator (`run.py`)
+```bash
+python3 run.py                                             # all programs, all modules
+python3 run.py --program-id shopify_h1                    # single program, all modules
+python3 run.py --program-id shopify_h1 --modules ingest,probe,scan
+python3 run.py --program-id shopify_h1 --skip crawl,dork
+python3 run.py --program-id shopify_h1 --force            # ignore all intervals
+python3 run.py --program-id shopify_h1 --severity critical,high
+python3 run.py --program-id shopify_h1 --dry-run          # preview, no execution
+python3 run.py --program-id shopify_h1 --stop-on-error
+
+# Daemon mode
+python3 run.py --daemon
+python3 run.py --daemon --program-id shopify_h1
+python3 run.py --daemon --ingest-interval 1800 --probe-interval 3600 \
+  --scan-interval 10800 --crawl-interval 21600 \
+  --github-interval 10800 --portscan-interval 43200 \
+  --dork-interval 43200 --asn-interval 43200
+```
+
+### Module 6 — GitHub OSINT (`github_osint.py`)
+```bash
+python3 github_osint.py                                    # all active programs
+python3 github_osint.py --program-id shopify_h1           # single program
+python3 github_osint.py --domain shopify.com               # quick test (no DB write)
+```
+
+### Module 7 — Port Scanner (`port_scanner.py`)
+```bash
+python3 port_scanner.py                                    # all active programs
+python3 port_scanner.py --program-id shopify_h1           # single program
+python3 port_scanner.py --ip 1.2.3.4                      # quick test (no DB write)
+python3 port_scanner.py --ip 1.2.3.4 --skip-nmap          # masscan discovery only
+```
+
+### Module 8 — Google Dork (`google_dork.py`)
+```bash
+python3 google_dork.py                                     # all active programs
+python3 google_dork.py --program-id shopify_h1            # single program
+python3 google_dork.py --domain shopify.com                # quick test (no DB write)
+```
+
+### Module 9 — ASN Mapper (`asn_mapper.py`)
+```bash
+python3 asn_mapper.py                                      # all active programs
+python3 asn_mapper.py --program-id shopify_h1             # single program
+python3 asn_mapper.py --domain shopify.com                 # quick test (no DB write)
+```
+
+### Reporting (`report.py`)
+```bash
+python3 report.py --program-id shopify_h1                 # full report
+python3 report.py --program-id shopify_h1 --new-only      # unreviewed findings only
+python3 report.py --program-id shopify_h1 --severity critical,high
+python3 report.py --program-id shopify_h1 \
+  --output reports/shopify_submission.html
+```
+
+### API Server (`serve.py`)
+```bash
+python3 serve.py                                           # default 0.0.0.0:8000
+python3 serve.py --port 9000
+python3 serve.py --reload                                  # hot-reload (dev mode)
+python3 serve.py --host 127.0.0.1                          # localhost only
+python3 get_api_key.py                                     # show API key
+python3 get_api_key.py --rotate                            # generate new key
+```
+
+---
+
+## Pipeline Architecture — Data Flow
+
+```
+                    ╔══════════════════════════════════════╗
+                    ║          run.py  (Module 5)          ║
+                    ║   Independent async loop per module  ║
+                    ╚══════════════╤═══════════════════════╝
+                                   │
+          ┌────────────────────────┼────────────────────────┐
+          │                        │                        │
+    Every 1h                  Every 2h                 Every 6h
+          │                        │                        │
+    ┌─────▼──────┐          ┌──────▼─────┐          ┌──────▼─────┐
+    │ MODULE 1   │          │ MODULE 2   │          │ MODULE 3   │
+    │ Ingestor   │──────────▶  Prober   │──────────▶  Scanner  │
+    │            │  new      │            │  alive+   │            │
+    │ Subfinder  │  assets   │ httpx      │  interest │ Nuclei     │
+    │ crt.sh     │  ▼DB      │ Wappalyzer │  ▼DB      │ tech tags  │
+    │ Shodan     │           │ Classifier │           │ CVE lookup │
+    └────────────┘           └────────────┘           └──────┬─────┘
+                                                             │findings
+                                                             ▼DB
+          ┌────────────────────────┬────────────────────────┐
+          │                        │                        │
+    Every 12h                 Every 6h                Every 24h
+          │                        │                        │
+    ┌─────▼──────┐          ┌──────▼─────┐          ┌──────▼─────┐
+    │ MODULE 4   │          │ MODULE 6   │          │ MODULE 7   │
+    │ Crawler    │          │ GitHub     │          │ Port Scan  │
+    │            │          │ OSINT      │          │            │
+    │ Katana     │          │            │          │ Masscan    │
+    │ wayback    │          │ 40+ dorks  │          │ Nmap -sV   │
+    │ gau        │          │ API keys   │          │ banners    │
+    │ JS secrets │          │ .env leaks │          │ services   │
+    └─────┬──────┘          └──────┬─────┘          └──────┬─────┘
+          │endpoints                │leaks                  │ports
+          ▼DB                      ▼DB                    ▼DB
+          │
+          │         Every 24h              Every 24h
+          │       ┌──────▼─────┐        ┌──────▼─────┐
+          │       │ MODULE 8   │        │ MODULE 9   │
+          │       │ Dork Engine│        │ ASN Mapper │
+          │       │            │        │            │
+          │       │ Google CSE │        │ ipinfo.io  │
+          │       │ Brave API  │        │ RIPE Stat  │
+          │       │ SerpAPI    │        │ IP ranges  │
+          │       └──────┬─────┘        └──────┬─────┘
+          │              │dorks                │prefixes
+          │              ▼DB                  ▼DB (→ Module 7)
+          │
+          └──────────────────────────────────────┐
+                                                 │
+                                          ┌──────▼──────┐
+                                          │  MongoDB     │
+                                          │  Atlas M0    │
+                                          │  (free tier) │
+                                          └──────┬──────┘
+                                                 │
+                              ┌──────────────────┴──────────────────┐
+                              │                                      │
+                       ┌──────▼──────┐                      ┌───────▼─────┐
+                       │ core/alerts  │                      │  report.py  │
+                       │             │                      │             │
+                       │ Discord     │                      │ Tabbed HTML │
+                       │ Telegram    │                      │ Critical/   │
+                       │ 7-day dedup │                      │ High/Medium │
+                       └─────────────┘                      └─────────────┘
+```
+
+**State tracking at every stage:**
+- Every domain: `is_new=True` on first insert → alert fires → `is_new=False`
+- Every finding: `suppress_until = now + 7 days` after alert → no re-alert
+- SHA-256 dedup keys: same vuln on same endpoint = same DB document forever
+
+---
+
+## Performance Notes
+
+- **Atlas M0 free tier**: Large collection queries can take 30–90 seconds. The 120s `socketTimeoutMS` in `db/mongo.py` gives them room to complete. Compound indexes on `(program_id, severity, first_seen)` make report queries fast.
+- **Rate limiting**: All tools use configurable delays. Nuclei defaults to 50 req/sec. BGPView and GitHub API calls have their own `rate_delay` settings.
+- **Concurrency**: All 9 modules run independent async loops in daemon mode — a slow crawl never delays the next hourly ingestion.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Language | Python 3.10+ |
+| Async | asyncio, Motor (async MongoDB driver) |
+| Data validation | Pydantic v2 |
+| Database | MongoDB Atlas M0 (free tier) |
+| Logging | Loguru |
+| HTTP client | aiohttp |
+| API framework | FastAPI + uvicorn |
+| Rate limiting | slowapi |
+| Recon | Subfinder, httpx, Nuclei, Katana, waybackurls, gau |
+| Port scanning | Masscan + Nmap |
+| JS analysis | Custom regex (25 patterns) + SecretFinder |
+| Notifications | Discord Webhooks + Telegram Bot API |

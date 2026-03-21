@@ -29,3 +29,6 @@ logs/*.log
 *.swo
 .DS_Store
 Thumbs.db
+
+# Report directory
+reports/

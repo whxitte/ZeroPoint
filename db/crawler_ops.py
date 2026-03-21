@@ -186,6 +186,7 @@ async def upsert_endpoint(endpoint: CrawledEndpoint) -> bool:
                 "$setOnInsert": {
                     **endpoint.model_dump(exclude={"last_seen", "crawl_run_id"}),
                     "first_seen": now,
+                    "last_seen":  now,
                     "is_new":     True,
                 },
             },
@@ -267,6 +268,7 @@ async def upsert_secret(secret: CrawlSecret) -> bool:
                 "$setOnInsert": {
                     **secret.model_dump(exclude={"last_seen", "crawl_run_id"}),
                     "first_seen": now,
+                    "last_seen":  now,
                     "is_new":     True,
                 },
             },
@@ -285,16 +287,18 @@ async def upsert_secret(secret: CrawlSecret) -> bool:
         raise
 
 
-async def mark_secrets_notified(secret_ids: List[str]) -> None:
-    """Flip is_new=False after alerts have been dispatched."""
+async def mark_secrets_notified(secret_ids: List[str], suppress_days: int = 7) -> None:
+    """Flip is_new=False and set suppress_until after alerts dispatched."""
     if not secret_ids:
         return
-    col = get_secrets_col()
+    from datetime import timedelta
+    col         = get_secrets_col()
+    suppress_ts = datetime.now(timezone.utc) + timedelta(days=suppress_days)
     await col.update_many(
         {"secret_id": {"$in": secret_ids}},
-        {"$set": {"is_new": False}},
+        {"$set": {"is_new": False, "suppress_until": suppress_ts}},
     )
-    logger.debug(f"[crawler] Marked {len(secret_ids)} secret(s) notified")
+    logger.debug(f"[crawler] Marked {len(secret_ids)} secret(s) notified | suppress_until={suppress_ts.date()}")
 
 
 async def get_secret_stats(program_id: str) -> dict:

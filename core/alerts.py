@@ -57,6 +57,28 @@ def _get_notify_sem() -> asyncio.Semaphore:
     return _notify_sem
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Notification dedup — 7-day re-alert suppression
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _is_suppressed(finding) -> bool:
+    """
+    Return True if this finding should NOT generate an alert right now.
+    A finding is suppressed when suppress_until is set and is in the future.
+    This prevents re-alerts for the same finding every scan cycle.
+    """
+    from datetime import datetime, timezone
+    suppress_until = getattr(finding, "suppress_until", None)
+    if not suppress_until:
+        return False
+    now = datetime.now(timezone.utc)
+    # suppress_until may be a datetime or a dict (from MongoDB)
+    if hasattr(suppress_until, "tzinfo"):
+        return suppress_until > now
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Color constants
 # ---------------------------------------------------------------------------
@@ -403,10 +425,11 @@ _SEV_EMOJI = {
 async def notify_finding(finding, program_id: str) -> None:
     """
     Fire an IMMEDIATE rich alert for a single new Nuclei finding.
-    This is the money alert — CRITICAL/HIGH fire the moment Nuclei reports them.
-
-    `finding` is a Finding model instance (typed loosely to avoid circular import).
+    Suppressed if the same finding was already alerted within the last 7 days.
     """
+    if _is_suppressed(finding):
+        logger.debug(f"[alerts] Suppressed (within 7-day window): {getattr(finding, 'template_id', '')}")
+        return
     sev   = finding.severity.lower() if hasattr(finding.severity, "lower") else str(finding.severity)
     emoji = _SEV_EMOJI.get(sev, "⚪")
     color = _SEV_COLOR.get(sev, 0x888888)
@@ -533,9 +556,11 @@ _SECRET_SEV_EMOJI = {
 async def notify_secret(secret, program_id: str) -> None:
     """
     Immediate alert for a newly discovered secret/credential.
-    `secret` is a CrawlSecret model instance.
-    This is the highest-value alert in the entire pipeline.
+    Suppressed if already alerted within the last 7 days.
     """
+    if _is_suppressed(secret):
+        logger.debug(f"[alerts] Suppressed secret: {getattr(secret, 'secret_type', '')}")
+        return
     sev   = secret.severity.value if hasattr(secret.severity, "value") else str(secret.severity)
     emoji = _SECRET_SEV_EMOJI.get(sev, "🔐")
     color = _SECRET_SEV_COLOR.get(sev, 0x888888)
@@ -673,10 +698,12 @@ _GH_SEV_EMOJI = {
 
 async def notify_github_leak(leak, program_id: str) -> None:
     """
-    Immediate alert for a newly discovered GitHub credential leak.
-    This is the highest-signal alert in the entire platform — leaked
-    production credentials on public GitHub are often valid and critical.
+    Immediate alert for a GitHub credential leak. Suppressed within 7-day window.
+    This is the highest-signal alert — leaked production credentials are often valid.
     """
+    if _is_suppressed(leak):
+        logger.debug(f"[alerts] Suppressed github leak: {getattr(leak, 'match_type', '')}")
+        return
     sev   = leak.severity.value if hasattr(leak.severity, "value") else str(leak.severity)
     emoji = _GH_SEV_EMOJI.get(sev, "🔐")
     color = _GH_SEV_COLOR.get(sev, 0x888888)

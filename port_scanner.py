@@ -47,6 +47,7 @@ import db.mongo as mongo_ops
 from config import settings
 from core.alerts import notify_port_finding, notify_port_scan_summary
 from db.mongo import get_assets_col
+from db.asn_ops import get_asn_prefixes_for_program
 from db.portscan_ops import (
     ensure_portscan_indexes,
     mark_findings_notified,
@@ -157,11 +158,30 @@ async def scan_program(
         await save_port_scan_run(run)
         return run
 
-    # Count unique IPs
+    # Count unique IPs from assets
     all_ips = set()
     for a in assets:
         all_ips.update(a.ip_addresses or [])
-    run.targets = len(all_ips)
+
+    # Extend with ASN-discovered prefixes (run asn_mapper.py first to populate)
+    asn_prefixes = await get_asn_prefixes_for_program(program_id)
+    if asn_prefixes:
+        logger.info(
+            f"[portscan] +{len(asn_prefixes)} ASN prefix(es) from Module 9 — "
+            f"extending scan beyond known asset IPs"
+        )
+        # Add prefixes as pseudo-assets so the scanner can process them
+        for prefix in asn_prefixes:
+            # Create a lightweight fake asset carrying the CIDR as an "IP"
+            # The port scanner's _run_masscan accepts CIDR notation directly
+            fake = Asset(
+                domain       = prefix,   # masscan treats this as the target
+                program_id   = program_id,
+                ip_addresses = [prefix],
+            )
+            assets.append(fake)
+
+    run.targets = len(all_ips) + len(asn_prefixes)
 
     sev_counter:     Counter   = Counter()
     new_finding_ids: List[str] = []

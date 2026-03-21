@@ -119,16 +119,18 @@ async def upsert_port_finding(finding: PortFinding) -> bool:
         raise
 
 
-async def mark_findings_notified(finding_ids: List[str]) -> None:
-    """Flip is_new=False after alerts dispatched."""
+async def mark_findings_notified(finding_ids: List[str], suppress_days: int = 7) -> None:
+    """Flip is_new=False and set suppress_until after alerts dispatched."""
     if not finding_ids:
         return
-    col = get_findings_col()
+    from datetime import timedelta
+    col         = get_findings_col()
+    suppress_ts = datetime.now(timezone.utc) + timedelta(days=suppress_days)
     await col.update_many(
         {"finding_id": {"$in": finding_ids}},
-        {"$set": {"is_new": False}},
+        {"$set": {"is_new": False, "suppress_until": suppress_ts}},
     )
-    logger.debug(f"[portscan] Marked {len(finding_ids)} finding(s) notified")
+    logger.debug(f"[portscan] Marked {len(finding_ids)} item(s) notified | suppress_until={suppress_ts.date()}")
 
 
 async def get_port_stats(program_id: str) -> dict:

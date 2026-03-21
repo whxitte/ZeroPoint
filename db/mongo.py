@@ -43,7 +43,7 @@ def _get_client() -> motor.motor_asyncio.AsyncIOMotorClient:
             settings.MONGODB_URI,
             serverSelectionTimeoutMS=10_000,
             connectTimeoutMS=10_000,
-            socketTimeoutMS=30_000,
+            socketTimeoutMS=120_000,   # 2 min — large collection queries on Atlas M0 can take >30s
         )
         logger.debug("Motor client initialised.")
     return _client
@@ -107,6 +107,9 @@ async def ensure_indexes() -> None:
             IndexModel([("tenant_id",  ASCENDING)],  name="finding_tenant_id"),
             IndexModel([("tenant_id", ASCENDING), ("program_id", ASCENDING)],
                        name="finding_tenant_program"),
+            # Compound index for report queries: covers program_id filter + severity+first_seen sort
+            IndexModel([("program_id", ASCENDING), ("severity", ASCENDING), ("first_seen", ASCENDING)],
+                       name="findings_report_query"),
         ])
 
         # Scan runs collection

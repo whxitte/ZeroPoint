@@ -116,16 +116,19 @@ async def upsert_leak(leak: GitHubLeak) -> bool:
         raise
 
 
-async def mark_leaks_notified(leak_ids: List[str]) -> None:
-    """Flip is_new=False after alerts dispatched."""
+async def mark_leaks_notified(leak_ids: List[str], suppress_days: int = 7) -> None:
+    """Flip is_new=False and set suppress_until after alerts dispatched."""
     if not leak_ids:
         return
-    col = get_leaks_col()
+    from datetime import timedelta
+    from datetime import datetime, timezone
+    col         = get_leaks_col()
+    suppress_ts = datetime.now(timezone.utc) + timedelta(days=suppress_days)
     await col.update_many(
         {"leak_id": {"$in": leak_ids}},
-        {"$set": {"is_new": False}},
+        {"$set": {"is_new": False, "suppress_until": suppress_ts}},
     )
-    logger.debug(f"[github] Marked {len(leak_ids)} leak(s) notified")
+    logger.debug(f"[github] Marked {len(leak_ids)} leak(s) notified | suppress_until={suppress_ts.date()}")
 
 
 async def get_leak_stats(program_id: str) -> dict:

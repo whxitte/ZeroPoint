@@ -66,7 +66,7 @@ from db.scanner_ops import ensure_scanner_indexes
 # Pipeline stage definitions
 # ─────────────────────────────────────────────────────────────────────────────
 
-ALL_MODULES = ["ingest", "probe", "scan", "crawl", "github", "portscan", "dork"]
+ALL_MODULES = ["ingest", "probe", "scan", "crawl", "github", "portscan", "dork", "asn"]
 
 MODULE_LABELS = {
     "ingest":   "Module 1 \u2014 Ingestion",
@@ -87,6 +87,7 @@ DEFAULT_INTERVALS = {
     "github":   21600,   # 6 hours  (GitHub rate limit: 30 req/min auth)
     "portscan": 86400,   # 24 hours (port scan daily)
     "dork":     86400,   # 24 hours (Google CSE: 100 free queries/day)
+    "asn":      86400,   # 24 hours (IP ranges change infrequently)
 }
 
 
@@ -406,6 +407,33 @@ async def run_dork(program_id: str, force: bool = False) -> ModuleResult:
     return result
 
 
+
+async def run_asn(program_id: str, force: bool = False) -> ModuleResult:
+    """Run Module 9 (ASN Mapper) for one program."""
+    result = ModuleResult(module="asn", program_id=program_id)
+    try:
+        from asn_mapper import map_program, _build_mapper
+        from db.asn_ops import ensure_asn_indexes
+
+        await ensure_asn_indexes()
+        logger.info(f"[orchestrator] ▶ asn | program={program_id}")
+        mapper = _build_mapper()
+        run    = await map_program(program_id, mapper)
+        result.stats = {
+            "asns_found":    run.asns_found,
+            "prefixes_found": run.prefixes_found,
+        }
+
+    except Exception as exc:
+        result.success = False
+        result.error   = str(exc)
+        logger.error(f"[orchestrator] asn FAILED for {program_id}: {exc}")
+    finally:
+        result.finished_at = datetime.now(timezone.utc)
+
+    return result
+
+
 # Dispatch table — maps module name → runner function
 MODULE_RUNNERS = {
     "ingest":   run_ingest,
@@ -415,6 +443,7 @@ MODULE_RUNNERS = {
     "github":   run_github,
     "portscan": run_portscan,
     "dork":     run_dork,
+    "asn":      run_asn,
 }
 
 
@@ -584,7 +613,7 @@ class PipelineDaemon:
             "crawl":    settings.DAEMON_CRAWL_INTERVAL,
             "github":   settings.DAEMON_GITHUB_INTERVAL,
             "portscan": settings.DAEMON_PORTSCAN_INTERVAL,
-            "dork":     settings.DAEMON_DORK_INTERVAL,
+                "dork":     settings.DAEMON_DORK_INTERVAL,
         }
         self._last_run:   Dict[str, Optional[datetime]] = {m: None for m in ALL_MODULES}
         self._running:    bool = True
@@ -712,6 +741,8 @@ async def bootstrap_db() -> None:
     await ensure_portscan_indexes()
     from db.dork_ops import ensure_dork_indexes
     await ensure_dork_indexes()
+    from db.asn_ops import ensure_asn_indexes
+    await ensure_asn_indexes()
     logger.debug("[orchestrator] All DB indexes verified ✓")
 
 
@@ -832,6 +863,10 @@ Examples:
         "--dork-interval", type=int, default=None,
         help="Daemon: seconds between Google dork runs (default: 86400)",
     )
+    p.add_argument(
+        "--asn-interval", type=int, default=None,
+        help="Daemon: seconds between ASN mapping runs (default: 86400)",
+    )
 
     return p
 
@@ -887,6 +922,7 @@ async def main() -> None:
                 "github":   args.github_interval   or settings.DAEMON_GITHUB_INTERVAL,
                 "portscan": args.portscan_interval or settings.DAEMON_PORTSCAN_INTERVAL,
                 "dork":     args.dork_interval     or settings.DAEMON_DORK_INTERVAL,
+                "asn":      args.asn_interval      or settings.DAEMON_ASN_INTERVAL,
             }
             daemon = PipelineDaemon(
                 program_id = args.program_id,

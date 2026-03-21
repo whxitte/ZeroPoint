@@ -1,4 +1,4 @@
-# complete testing sequence
+# ZeroPoint — Complete Testing Guide
 
 ---
 
@@ -6,49 +6,86 @@
 
 ### Module 1 — Ingestion
 ```bash
-# Quick single-domain test
-python3 ingestor.py --domain gitlab.com --program-id gitlab_h1
+# Quick single-domain (no DB write for domain test, DB write for program)
+python3 ingestor.py --domain gitlab.com --program-id gitlab_h1   # seeds + runs
+python3 ingestor.py --program-id gitlab_h1                        # full run
 
-# Full program run
-python3 ingestor.py --program-id gitlab_h1
-
-# Expected: subdomains discovered, upserted to MongoDB, Discord/Telegram alert for any new ones
+# Expected: subdomains discovered, upserted to MongoDB, Discord/Telegram alert for new ones
 ```
 
 ### Module 2 — Prober
 ```bash
-# Quick single-domain test (no DB write)
-python3 prober.py --domain gitlab.com
+python3 prober.py --domain gitlab.com             # no DB write
+python3 prober.py --program-id gitlab_h1          # full program probe
+python3 prober.py --program-id gitlab_h1 --force  # re-probe all regardless of last_probed
 
-# Full program probe
-python3 prober.py --program-id gitlab_h1
-
-# Expected: HTTP status, tech stack, titles written to assets. CRITICAL/HIGH interest_level assets trigger alert
+# Expected: http_status, tech stack, interest_level written to assets collection
+# CRITICAL/HIGH interest_level assets trigger immediate alert
 ```
 
 ### Module 3 — Scanner
 ```bash
-# Quick single-domain test (no DB write, fires alerts)
+# Quick test — no DB write, alerts still fire
 python3 scanner.py --domain juice-shop.herokuapp.com --severity critical,high,medium
 
-# Full program scan
+# Full program
 python3 scanner.py --program-id gitlab_h1
+python3 scanner.py --program-id gitlab_h1 --force              # ignore 72h interval
+python3 scanner.py --program-id gitlab_h1 --severity critical,high
 
-# Force rescan (ignore 72h interval)
-python3 scanner.py --program-id gitlab_h1 --force
-
-# Expected: Nuclei findings stored in `findings` collection, immediate alert per new finding
+# Expected: findings in `findings` collection, alert per new finding (all severities)
 ```
 
 ### Module 4 — Crawler
 ```bash
-# Quick single-domain test (no DB write)
-python3 crawler.py --domain gitlab.com
-
-# Full program crawl
+python3 crawler.py --domain gitlab.com             # no DB write
 python3 crawler.py --program-id gitlab_h1
+python3 crawler.py --program-id gitlab_h1 --force  # ignore 48h interval
 
-# Expected: endpoints in `endpoints` collection, secrets in `secrets` collection, alerts fire
+# Expected: endpoints in `endpoints`, secrets in `secrets`, alerts fire for each
+```
+
+### Module 6 — GitHub OSINT
+```bash
+# Add to .env first: GITHUB_TOKEN=ghp_... (public_repo scope)
+python3 github_osint.py --domain shopify.com     # no DB write
+python3 github_osint.py --program-id shopify_h1
+```
+
+### Module 7 — Port Scanner
+```bash
+# One-time setup (allows masscan without sudo):
+sudo setcap cap_net_raw+ep $(which masscan)
+
+python3 port_scanner.py --ip 1.2.3.4             # no DB write
+python3 port_scanner.py --ip 1.2.3.4 --skip-nmap # masscan only, faster
+python3 port_scanner.py --program-id gitlab_h1
+```
+
+### Module 8 — Google Dork
+```bash
+# Setup in .env: GOOGLE_API_KEY + GOOGLE_CSE_ID (or SERPAPI_KEY or BRAVE_SEARCH_API_KEY)
+python3 google_dork.py --domain gitlab.com        # no DB write
+python3 google_dork.py --program-id gitlab_h1
+```
+
+### Module 9 — ASN Mapper
+```bash
+# Uses ipinfo.io + RIPE Stat (both free, no auth required)
+python3 asn_mapper.py --domain gitlab.com         # no DB write
+python3 asn_mapper.py --program-id gitlab_h1
+# Expected: company-owned IP ranges stored in asn_info collection
+# These are automatically picked up by Module 7 on the next port scan run
+```
+
+### Reporting
+```bash
+python3 report.py --program-id gitlab_h1
+python3 report.py --program-id gitlab_h1 --new-only
+python3 report.py --program-id gitlab_h1 --severity critical,high
+# Opens: reports/gitlab_h1_<timestamp>.html
+# Tabs: ALL | Critical | High | Medium | Vulns | JS Secrets | GH Leaks | Dork Hits | Open Ports | Endpoints
+# Non-clickable stats: Assets | Alive
 ```
 
 ---
@@ -56,31 +93,32 @@ python3 crawler.py --program-id gitlab_h1
 ## Phase 2 — Orchestrator Tests
 
 ```bash
-# 1. Dry-run first — see what would run without executing
+# 1. Dry-run — preview without executing
 python3 run.py --program-id gitlab_h1 --dry-run
 
-# 2. Single module through orchestrator
+# 2. Single module via orchestrator
 python3 run.py --program-id gitlab_h1 --modules ingest
+python3 run.py --program-id gitlab_h1 --modules probe
+python3 run.py --program-id gitlab_h1 --modules scan
 
-# 3. Two modules chained
+# 3. Module chains
 python3 run.py --program-id gitlab_h1 --modules ingest,probe
-
-# 4. Three modules chained
 python3 run.py --program-id gitlab_h1 --modules ingest,probe,scan
+python3 run.py --program-id gitlab_h1 --modules asn,portscan   # ASN feeds port scanner
 
-# 5. Full pipeline — all 4 modules
+# 4. Full 9-module pipeline
 python3 run.py --program-id gitlab_h1
 
-# 6. Skip a module
-python3 run.py --program-id gitlab_h1 --skip crawl
+# 5. Skip modules
+python3 run.py --program-id gitlab_h1 --skip crawl,dork,asn
 
-# 7. Force re-run everything
+# 6. Force re-run everything
 python3 run.py --program-id gitlab_h1 --force
 
-# 8. All active programs
+# 7. All active programs
 python3 run.py
 
-# 9. Daemon mode — let it run 5 minutes then Ctrl+C
+# 8. Daemon mode — run 5 minutes then Ctrl+C
 python3 run.py --daemon --program-id gitlab_h1
 ```
 
@@ -88,32 +126,24 @@ python3 run.py --daemon --program-id gitlab_h1
 
 ## Phase 3 — Database Verification
 
-After running the pipeline, verify data is landing correctly in MongoDB. You can check via MongoDB Atlas UI or:
-
 ```bash
-# Quick Python check — run from your ZeroPoint directory
 python3 - << 'EOF'
 import asyncio
 import db.mongo as mongo
-from config import settings
 
 async def check():
     await mongo._get_client().admin.command("ping")
     db = mongo.get_db()
-
-    assets    = await db.assets.count_documents({})
-    findings  = await db.findings.count_documents({})
-    endpoints = await db.endpoints.count_documents({})
-    secrets   = await db.secrets.count_documents({})
-    runs      = await db.scan_runs.count_documents({})
-    crawls    = await db.crawl_runs.count_documents({})
-
-    print(f"  assets:    {assets}")
-    print(f"  findings:  {findings}")
-    print(f"  endpoints: {endpoints}")
-    print(f"  secrets:   {secrets}")
-    print(f"  scan_runs: {runs}")
-    print(f"  crawl_runs:{crawls}")
+    print(f"  assets:         {await db.assets.count_documents({})}")
+    print(f"  findings:       {await db.findings.count_documents({})}")
+    print(f"  endpoints:      {await db.endpoints.count_documents({})}")
+    print(f"  secrets:        {await db.secrets.count_documents({})}")
+    print(f"  github_leaks:   {await db.github_leaks.count_documents({})}")
+    print(f"  port_findings:  {await db.port_findings.count_documents({})}")
+    print(f"  dork_results:   {await db.dork_results.count_documents({})}")
+    print(f"  asn_info:       {await db.asn_info.count_documents({})}")
+    print(f"  scan_runs:      {await db.scan_runs.count_documents({})}")
+    print(f"  crawl_runs:     {await db.crawl_runs.count_documents({})}")
     await mongo.close_connection()
 
 asyncio.run(check())
@@ -122,78 +152,95 @@ EOF
 
 ---
 
-## Phase 4 — Unit Tests
+## Phase 4 — REST API Tests
 
 ```bash
-# Run all tests
-pytest tests/ -v
+# Start the server
+python3 serve.py --reload
 
-# Run by module
+# Get your API key
+python3 get_api_key.py
+
+# Health check (no auth)
+curl http://localhost:8000/api/v1/health
+
+# List programs
+curl http://localhost:8000/api/v1/programs/ -H "X-API-Key: zp_..."
+
+# Assets for a program
+curl "http://localhost:8000/api/v1/assets/?program_id=gitlab_h1&probe_status=alive" \
+  -H "X-API-Key: zp_..."
+
+# Critical findings
+curl "http://localhost:8000/api/v1/findings/?program_id=gitlab_h1&severity=critical" \
+  -H "X-API-Key: zp_..."
+
+# Port scan results
+curl "http://localhost:8000/api/v1/portfindings/critical?program_id=gitlab_h1" \
+  -H "X-API-Key: zp_..."
+
+# Interactive docs
+open http://localhost:8000/api/docs
+```
+
+---
+
+## Phase 5 — Unit Tests
+
+```bash
+pytest tests/ -v
 pytest tests/test_ingestion.py -v
 pytest tests/test_prober.py -v
 pytest tests/test_scanner.py -v
 pytest tests/test_crawler.py -v
 ```
 
+All tests are network-free and database-free.
+
 ---
 
-## Test Github 
+## Recommended First-Run Sequence
 
 ```bash
-# Add to .env first:
-GITHUB_TOKEN=ghp_your_token_here   # needs public_repo scope
+# 1. Verify MongoDB is reachable
+python3 -c "import asyncio; import db.mongo as m; asyncio.run(m._get_client().admin.command('ping')); print('MongoDB OK')"
 
-# Quick test — no DB write, prints results live:
-python3 github_osint.py --domain shopify.com
+# 2. Seed your target program
+python3 seed_programs.py   # edit this file first with your targets
 
-# Run through the orchestrator as Module 6:
-python3 run.py --program-id shopify_h1 --modules github
+# 3. Run the full pipeline once manually in order
+python3 ingestor.py    --program-id target_h1   # ~5 min — find subdomains
+python3 prober.py      --program-id target_h1   # ~10 min — probe + fingerprint
+python3 asn_mapper.py  --program-id target_h1   # ~2 min — map IP ranges
+python3 port_scanner.py --program-id target_h1  # ~15 min — scan ports
+python3 scanner.py     --program-id target_h1   # ~30 min — Nuclei vuln scan
+python3 crawler.py     --program-id target_h1   # ~20 min — crawl + JS secrets
+python3 github_osint.py --program-id target_h1  # ~5 min — GitHub search
+python3 google_dork.py  --program-id target_h1  # ~5 min — Google dork
 
-# Launch the API server:
-python3 serve.py --reload
-# → Open http://localhost:8000/api/docs
+# 4. Review your findings
+python3 report.py --program-id target_h1
+open reports/target_h1_*.html
+
+# 5. Start the daemon for continuous monitoring
+python3 run.py --daemon --program-id target_h1
 ```
 
-## Test Port scaan
-```bash
-# This may require sudo privilaages, because masscan need raw socket privileges:
-# sudo -E $(which python3) port_scanner.py --ip 35.213.175.146
-# OR
-# Permanent fix (run once, no more sudo needed):
-# sudo setcap cap_net_raw+ep $(which masscan)
-# Now masscan works without sudo
-python3 port_scanner.py --ip 1.2.3.4          # no DB write
-python3 run.py --program-id gitlab_h1 --modules portscan
-```
+---
 
-## Test Google dork
-```bash
-# 1. console.cloud.google.com → enable "Custom Search API" → API key
-# 2. cse.google.com/cse → create engine → "Search the entire web" → get cx ID
-python3 google_dork.py --domain gitlab.com     # no DB write
-python3 run.py --program-id gitlab_h1 --modules dork
-```
+## Project Status
 
-
-## Is the project complete?
-
-The **core pipeline** is complete. Here's the honest picture:
-
-```
-✅ Module 1 — Ingestion         (Subfinder + crt.sh + Shodan)
-✅ Module 2 — Prober            (httpx fingerprinting)
-✅ Module 3 — Scanner           (Nuclei vuln scan)
-✅ Module 4 — Crawler           (Katana + Wayback + JS secrets)
-✅ Module 5 — Orchestrator      (manual + daemon mode)
-```
-
-**What's NOT built** (you chose to skip these earlier):
-
-| Feature | Value | Effort |
-|---|---|---|
-| **Scope Manager** | Auto-pull programs from HackerOne/Bugcrowd APIs. When a program adds a new wildcard, it triggers an immediate pipeline run. This is the "first-come-first-served" multiplier. | Medium |
-| **Reporting Engine** | Generate a clean HTML report per program: all findings sorted by severity, all secrets, all interesting endpoints. Ready to review before submitting. | Medium |
-| **Notification dedup window** | If the same secret/finding fires on every crawl run, you'll get flooded. A "don't re-alert for 7 days" window. | Small |
-| **HTTPX re-probe on new Nuclei findings** | When Nuclei finds something interesting, immediately re-probe that specific asset to capture any changes. | Small |
-
-The project is **production-ready as-is**. The scope manager and reporting engine are useful but you can hunt without them. Test everything above first, then tell me which of those four you want next if any.
+| Module | Status | What It Does |
+|--------|--------|--------------|
+| M1 — Ingestion | ✅ Complete | Subfinder + crt.sh + Shodan |
+| M2 — Prober | ✅ Complete | httpx + tech fingerprinting |
+| M3 — Scanner | ✅ Complete | Nuclei with smart template selection |
+| M4 — Crawler | ✅ Complete | Katana + waybackurls + JS secrets |
+| M5 — Orchestrator | ✅ Complete | Manual + 24/7 daemon |
+| M6 — GitHub OSINT | ✅ Complete | 40+ credential leak queries |
+| M7 — Port Scanner | ✅ Complete | Masscan + Nmap two-phase |
+| M8 — Google Dork | ✅ Complete | 39 templates, 3 API providers |
+| M9 — ASN Mapper | ✅ Complete | ipinfo.io + RIPE Stat |
+| Reporter | ✅ Complete | Tabbed HTML, severity filter |
+| SaaS REST API | ✅ Complete | FastAPI, JWT, multi-tenant |
+| 7-day alert dedup | ✅ Complete | suppress_until on all findings |

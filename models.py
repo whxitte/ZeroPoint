@@ -255,6 +255,7 @@ class Finding(BaseModel):
     first_seen:   datetime       = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_seen:    datetime       = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_new:       bool           = True
+    suppress_until: Optional[datetime] = None   # set after alert — suppresses re-alerts until this time
     scan_run_id:  Optional[str]  = None
     confirmed:    bool           = True
     extra:        Dict[str, Any] = Field(default_factory=dict)
@@ -310,6 +311,7 @@ class CrawlSecret(BaseModel):
     first_seen:   datetime               = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_seen:    datetime               = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_new:       bool                   = True
+    suppress_until: Optional[datetime]   = None
     crawl_run_id: Optional[str]          = None
 
     @field_validator("domain", mode="before")
@@ -411,6 +413,7 @@ class GitHubLeak(BaseModel):
     # Triage
     severity:       GitHubLeakSeverity = GitHubLeakSeverity.HIGH
     is_new:         bool           = True
+    suppress_until: Optional[datetime] = None
     is_verified:    bool           = False       # manually verified as live credential
     first_seen:     datetime       = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_seen:      datetime       = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -479,6 +482,7 @@ class PortFinding(BaseModel):
     severity:     PortFindingSeverity = PortFindingSeverity.INFO
     reason:       str     = ""                 # why this severity was assigned
     is_new:       bool    = True
+    suppress_until: Optional[datetime] = None
     scan_run_id:  Optional[str]  = None
     first_seen:   datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_seen:    datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -548,6 +552,7 @@ class DorkResult(BaseModel):
     reason:       str           = ""           # human readable reason
 
     is_new:       bool          = True
+    suppress_until: Optional[datetime] = None
     scan_run_id:  Optional[str] = None
     first_seen:   datetime      = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_seen:    datetime      = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -572,5 +577,49 @@ class DorkScanRun(BaseModel):
     queries_run:     int      = 0
     results_raw:     int      = 0    # total results before dedup
     new_findings:    int      = 0    # net-new after dedup
+    errors:          List[str] = Field(default_factory=list)
+    success:         bool     = True
+
+
+# ---------------------------------------------------------------------------
+# ASN Mapper (Module 9)
+# ---------------------------------------------------------------------------
+
+class ASNInfo(BaseModel):
+    """
+    A discovered ASN and its IP prefixes for a program.
+    Stored in `asn_info` collection.
+
+    Dedup key: (program_id, asn_number)
+    """
+    tenant_id:    str     = "default"
+
+    asn_number:   int                          # e.g. 13335
+    asn_name:     str                          # e.g. "CLOUDFLARENET"
+    program_id:   str
+    domain:       str                          # source domain that resolved to this ASN
+    ip_prefixes:  List[str]                    # CIDR ranges, e.g. ["104.16.0.0/12"]
+    ipv6_prefixes: List[str] = Field(default_factory=list)
+    country_code: Optional[str] = None
+    description:  Optional[str] = None
+
+    first_seen:   datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen:    datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_validator("domain", mode="before")
+    @classmethod
+    def normalise_domain(cls, v: str) -> str:
+        return v.lower().strip().rstrip(".")
+
+
+class ASNScanRun(BaseModel):
+    """Audit record for an ASN mapping run."""
+    run_id:          str      = Field(default_factory=lambda: __import__("uuid").uuid4().hex)
+    program_id:      str
+    started_at:      datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    finished_at:     Optional[datetime] = None
+    asns_found:      int      = 0
+    prefixes_found:  int      = 0
+    new_ips:         int      = 0
     errors:          List[str] = Field(default_factory=list)
     success:         bool     = True

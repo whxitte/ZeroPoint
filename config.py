@@ -123,6 +123,13 @@ class Settings(BaseSettings):
     GOOGLE_DORK_MAX_RESULTS: int   = Field(default=10, description="Results per dork query (max 10 for Google CSE free tier)")
     GOOGLE_DORK_RATE_DELAY:  float = Field(default=1.1, description="Seconds between Google API requests (free tier: <=10 req/s)")
     DAEMON_DORK_INTERVAL:    int   = Field(default=86400, description="Seconds between dork runs in daemon mode (default: 24h)")
+    DAEMON_ASN_INTERVAL:     int   = Field(default=86400, description="Seconds between ASN mapping runs in daemon mode (default: 24h)")
+
+    # ── ASN Mapper (Module 9) settings ───────────────────────────────────────
+    ASN_RATE_DELAY:      float = Field(default=1.2, description="Seconds between BGPView API requests")
+    ASN_MAX_PREFIX_SIZE: int   = Field(default=65536, description="Skip prefixes with more IPs than this (/16 and larger)")
+    ASN_SKIP_CDN:        bool  = Field(default=True,  description="Skip known CDN/cloud ASNs (Cloudflare, Akamai, AWS, etc.)")
+    IPINFO_TOKEN:        Optional[str] = Field(default=None, description="ipinfo.io token for higher rate limits (optional, 50k req/month free without)")
 
     # ── Crawler (Module 4) settings ──────────────────────────────────────────
     CRAWLER_DEPTH:           int  = Field(default=3,    description="Katana crawl depth")

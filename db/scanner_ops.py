@@ -79,16 +79,21 @@ async def upsert_finding(finding: Finding) -> bool:
         raise
 
 
-async def mark_findings_notified(finding_ids: List[str]) -> None:
-    """Flip is_new=False after Discord/Telegram alerts have been sent."""
+async def mark_findings_notified(finding_ids: List[str], suppress_days: int = 7) -> None:
+    """
+    Flip is_new=False and set suppress_until after alerts have been sent.
+    suppress_until prevents re-alerts for `suppress_days` days (default: 7).
+    """
     if not finding_ids:
         return
-    col = get_findings_col()
+    from datetime import timedelta
+    col          = get_findings_col()
+    suppress_ts  = datetime.now(timezone.utc) + timedelta(days=suppress_days)
     await col.update_many(
         {"finding_id": {"$in": finding_ids}},
-        {"$set": {"is_new": False}},
+        {"$set": {"is_new": False, "suppress_until": suppress_ts}},
     )
-    logger.debug(f"[scanner] Marked {len(finding_ids)} finding(s) notified (is_new=False)")
+    logger.debug(f"[scanner] Marked {len(finding_ids)} finding(s) notified | suppress_until={suppress_ts.date()}")
 
 
 async def get_new_findings(program_id: str) -> List[Finding]:
