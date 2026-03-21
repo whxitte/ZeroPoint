@@ -468,66 +468,77 @@ class PipelineDaemon:
         elapsed = (datetime.now(timezone.utc) - last).total_seconds()
         return elapsed >= self.intervals[module]
 
-    async def _tick(self) -> None:
+    async def _run_module_loop(self, module: str) -> None:
         """
-        One daemon tick — check all modules, run any that are due.
-        Modules run sequentially within a tick to avoid overwhelming the target.
+        Independent async loop for a single module.
+        Each module runs on its own timer, completely independent of other modules.
+        A 4-hour crawl will never block ingest from firing on its 1-hour schedule.
         """
-        for module in self.modules:
-            if not self._running:
-                break
-            if not self._is_due(module):
-                continue
-
-            interval_h = self.intervals[module] / 3600
-            logger.info(
-                f"[daemon] ► {module} is due "
-                f"(interval={interval_h:.1f}h | runs={self._run_counts[module]})"
-            )
-
+        while self._running:
             try:
-                if self.program_id:
-                    if module == "scan":
-                        result = await MODULE_RUNNERS[module](
-                            self.program_id, force=False, severity=self.severity
-                        )
-                    else:
-                        result = await MODULE_RUNNERS[module](self.program_id, force=False)
-                    module_results = [result]
-                else:
-                    # All programs
-                    programs = await mongo_ops.list_active_programs()
-                    module_results = []
-                    for prog in programs:
-                        if not self._running:
-                            break
+                if self._is_due(module):
+                    interval_h = self.intervals[module] / 3600
+                    logger.info(
+                        f"[daemon] ► {module} is due "
+                        f"(interval={interval_h:.1f}h | runs={self._run_counts[module]})"
+                    )
+
+                    if self.program_id:
                         if module == "scan":
-                            r = await MODULE_RUNNERS[module](
-                                prog.program_id, force=False, severity=self.severity
+                            result = await MODULE_RUNNERS[module](
+                                self.program_id, force=False, severity=self.severity
                             )
                         else:
-                            r = await MODULE_RUNNERS[module](prog.program_id, force=False)
-                        module_results.append(r)
+                            result = await MODULE_RUNNERS[module](self.program_id, force=False)
+                        module_results = [result]
+                    else:
+                        programs = await mongo_ops.list_active_programs()
+                        module_results = []
+                        for prog in programs:
+                            if not self._running:
+                                break
+                            if module == "scan":
+                                r = await MODULE_RUNNERS[module](
+                                    prog.program_id, force=False, severity=self.severity
+                                )
+                            else:
+                                r = await MODULE_RUNNERS[module](prog.program_id, force=False)
+                            module_results.append(r)
 
-                self._last_run[module]    = datetime.now(timezone.utc)
-                self._run_counts[module] += 1
+                    self._last_run[module]    = datetime.now(timezone.utc)
+                    self._run_counts[module] += 1
 
-                successes = sum(1 for r in module_results if r.success)
-                failures  = len(module_results) - successes
-                logger.info(
-                    f"[daemon] ✓ {module} complete | "
-                    f"programs={len(module_results)} ok={successes} fail={failures}"
-                )
+                    successes = sum(1 for r in module_results if r.success)
+                    failures  = len(module_results) - successes
+                    logger.info(
+                        f"[daemon] ✓ {module} complete | "
+                        f"programs={len(module_results)} ok={successes} fail={failures}"
+                    )
 
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.exception(f"[daemon] {module} raised exception: {exc}")
-                # Don't update last_run so it retries on next tick
+                # Mark as run even on failure so it doesn't immediately retry
                 self._last_run[module] = datetime.now(timezone.utc)
 
+            # Sleep in 30s increments so stop() is responsive
+            for _ in range(30):
+                if not self._running:
+                    return
+                await asyncio.sleep(1)
+
     async def run(self) -> None:
-        """Main daemon loop — checks every 60 seconds whether any module is due."""
+        """
+        Main daemon entry point.
+
+        Launches each module as its own independent async loop running concurrently.
+        This means a 4-hour crawl will never block ingest from firing on its 1-hour
+        schedule — each module is completely independent.
+
+        Order within each module is still sequential (one program at a time),
+        but ingest/probe/scan/crawl all run on their own clocks simultaneously.
+        """
         logger.info(
             f"\n{'═' * 62}\n"
             f"  ZeroPoint Daemon starting\n"
@@ -540,27 +551,15 @@ class PipelineDaemon:
             + f"\n{'═' * 62}"
         )
 
-        # Run a full pipeline immediately on startup (don't wait for first interval)
-        logger.info("[daemon] Running initial pipeline on startup...")
-        await self._tick()
-
-        while self._running:
-            try:
-                # Sleep in 60s increments so Ctrl+C is responsive
-                for _ in range(60):
-                    if not self._running:
-                        break
-                    await asyncio.sleep(1)
-
-                if self._running:
-                    await self._tick()
-
-            except asyncio.CancelledError:
-                logger.info("[daemon] Cancelled — shutting down cleanly")
-                break
-            except Exception as exc:
-                logger.exception(f"[daemon] Unexpected error in main loop: {exc}")
-                await asyncio.sleep(60)  # Back off before retrying
+        # Each module gets its own independent loop — they run concurrently,
+        # never blocking each other regardless of how long any one module takes.
+        try:
+            await asyncio.gather(
+                *[self._run_module_loop(module) for module in self.modules],
+                return_exceptions=True,
+            )
+        except asyncio.CancelledError:
+            logger.info("[daemon] Cancelled — shutting down cleanly")
 
         logger.info("[daemon] Daemon stopped")
 
