@@ -63,7 +63,7 @@ from db.crawler_ops import ensure_crawler_indexes
 from db.github_ops import ensure_github_indexes
 from db.scanner_ops import ensure_scanner_indexes
 
-from api.routes import auth, programs, assets, findings, leaks, port_findings, dork_results
+from api.routes import auth, programs, assets, findings, leaks, port_findings, dork_results, crawler
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,6 +171,7 @@ app.include_router(findings.router, prefix=PREFIX)
 app.include_router(leaks.router,          prefix=PREFIX)
 app.include_router(port_findings.router,  prefix=PREFIX)
 app.include_router(dork_results.router,   prefix=PREFIX)
+app.include_router(crawler.router,        prefix=PREFIX)
 
 
 @app.get("/api/v1/health", tags=["system"])

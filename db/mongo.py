@@ -137,7 +137,7 @@ async def upsert_program(program: Program) -> None:
     now = datetime.now(timezone.utc)
 
     await col.update_one(
-        {"program_id": program.program_id},
+        {"program_id": program.program_id, "tenant_id": program.tenant_id},  # tenant-scoped key
         {
             "$set": {
                 **program.model_dump(exclude={"created_at"}),
