@@ -79,6 +79,8 @@ async def upsert_asn_info(asn: ASNInfo) -> bool:
         result = await col.update_one(
             {"program_id": asn.program_id, "asn_number": asn.asn_number},
             {
+                # Rule: a field must appear in EITHER $set OR $setOnInsert, never both.
+                # asn_name and description are in $set → excluded from $setOnInsert.
                 "$set": {
                     "last_seen":    now,
                     "ip_prefixes":  asn.ip_prefixes,
@@ -87,7 +89,10 @@ async def upsert_asn_info(asn: ASNInfo) -> bool:
                     "description":  asn.description,
                 },
                 "$setOnInsert": {
-                    **asn.model_dump(exclude={"last_seen", "ip_prefixes", "ipv6_prefixes"}),
+                    **asn.model_dump(exclude={
+                        "last_seen", "ip_prefixes", "ipv6_prefixes",
+                        "asn_name", "description",   # already in $set above
+                    }),
                     "first_seen": now,
                 },
             },

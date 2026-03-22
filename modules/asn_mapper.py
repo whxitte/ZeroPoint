@@ -262,22 +262,31 @@ def _company_name_from_domain(domain: str) -> str:
 CDN_CLOUD_ASNS = {
     # Cloudflare
     13335, 209242, 132892, 395747,
-    # Akamai
-    20940, 16625, 217644,
+    # Akamai — multiple ASNs (AS33905 seen for tesla.com)
+    20940, 16625, 217644, 33905, 16702, 35994, 23455, 23454,
+    18717, 18680, 12222, 17204, 7922, 40927,
     # Fastly
     54113,
-    # AWS CloudFront / EC2
-    16509, 14618,
+    # AWS CloudFront / EC2 / various AWS regions
+    16509, 14618, 8987, 7224,
     # GCP
     15169, 396982,
-    # Azure
-    8075, 8069,
+    # Azure / Microsoft
+    8075, 8069, 3598, 6584,
     # Vercel / Netlify / GitHub Pages
     76153, 9026, 36459,
     # Incapsula / Imperva
     19551,
     # Sucuri
     30148,
+    # BunnyCDN / KeyCDN / Limelight
+    47172, 22822, 64120,
+    # StackPath / MaxCDN
+    33438, 13649,
+    # Edgio (formerly Limelight)
+    22822,
+    # Discourse CDN (civilized discourse — seen in gitlab assets)
+    # Note: 394230 is NOT a CDN; it's Discourse's own ASN — let it through
 }
 
 
@@ -364,7 +373,15 @@ class ASNMapper:
                     continue
                 seen_asns.add(asn_number)
 
-                if self.skip_cdn and asn_number in CDN_CLOUD_ASNS:
+                # Skip by ASN number OR by well-known CDN name patterns
+                cdn_keywords = (
+                    "cloudflare", "akamai", "fastly", "amazon", "amazonaws",
+                    "google", "microsoft", "azure", "incapsula", "imperva",
+                    "sucuri", "limelight", "edgio", "stackpath", "maxcdn",
+                    "bunny", "keycdn",
+                )
+                is_cdn_name = any(kw in asn_name.lower() for kw in cdn_keywords)
+                if self.skip_cdn and (asn_number in CDN_CLOUD_ASNS or is_cdn_name):
                     cdn_asns.add(asn_number)
                     logger.debug(
                         f"[asn] {ip} → AS{asn_number} ({asn_name}) — CDN/cloud, skipping"

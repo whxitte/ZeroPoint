@@ -120,3 +120,28 @@ Everything runs in a single Python process sharing one Motor connection pool. No
 | Reporter | ✅ Active | Tabbed HTML, severity filtering |
 | SaaS REST API | ✅ Active | FastAPI, JWT, multi-tenant |
 | Report | ✅ Active | 7-day dedup, tabbed HTML |
+
+---
+
+## Individual / Hacker Use (~60–70% Complete)
+
+| Missing Feature            | Why It Matters |
+|---------------------------|----------------|
+| Scope Manager             | No HackerOne/Bugcrowd API sync. Users must manually add programs via `seed_programs.py`. A real product should auto-populate programs when a hunter adds their H1 username. |
+| React Dashboard           | Current UI is a static HTML report generated on demand. A real product needs a live dashboard showing findings in real time. |
+| User Onboarding Flow      | No signup page, no self-serve tenant creation, and no way for new users to get started without manually running `get_api_key.py`. |
+| Billing                   | No Stripe integration, so you can’t charge users. |
+| Program Isolation         | Tenant system exists in DB, but pipeline scripts (`ingestor.py`, `scanner.py`, etc.) don’t filter by tenant and run against all programs. |
+
+---
+
+## Commercial / Enterprise Use (~45% Complete)
+
+| Missing Feature                  | Why It Matters |
+|---------------------------------|----------------|
+| Compliance / Audit Logs         | Enterprise buyers require SOC2-level audit trails. |
+| Role-Based Access Control (RBAC)| Current model is one API key = full access. Enterprises need roles like admin, analyst, read-only, etc. |
+| White-label / Custom Domains    | Companies want branded domains like `security.theirname.com`. |
+| SLA + Reliability               | Atlas M0 free tier throttles under load. Enterprise requires M10+ with replicas and high availability. |
+| Webhook Integrations            | Teams use tools like Jira, Slack, PagerDuty, ServiceNow — findings need to be pushed into workflows. |
+| False Positive Management       | No way to mark findings as "accepted risk" or "false positive," which is essential for repeated scans. |
