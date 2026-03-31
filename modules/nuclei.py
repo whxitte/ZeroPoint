@@ -525,6 +525,29 @@ class NucleiScanner:
             ):
                 yield finding
 
+    # Domain → tech keyword mapping for when httpx can't fingerprint through a reverse proxy
+    _DOMAIN_TECH_HINTS = {
+        "kibana":        "kibana",
+        "grafana":       "grafana",
+        "elastic":       "elasticsearch",
+        "elasticsearch": "elasticsearch",
+        "jenkins":       "jenkins",
+        "gitlab":        "gitlab",
+        "jira":          "jira",
+        "sonar":         "sonarqube",
+        "code-review":   "sonarqube",
+        "pgadmin":       "pgadmin",
+        "phpmyadmin":    "phpmyadmin",
+        "airflow":       "airflow",
+        "jupyter":       "jupyter",
+        "vault":         "vault",
+        "consul":        "consul",
+        "grafana":       "grafana",
+        "prometheus":    "prometheus",
+        "minio":         "minio",
+        "rabbitmq":      "rabbitmq",
+    }
+
     async def _scan_batch(
         self,
         assets,
@@ -535,6 +558,16 @@ class NucleiScanner:
         all_techs = []
         for a in assets:
             all_techs.extend(a.technologies)
+            # Infer technology from domain name when httpx couldn't fingerprint
+            # through a reverse proxy (e.g. kibana.example.com behind Nginx)
+            domain_lower = a.domain.lower()
+            for keyword, tech in _DOMAIN_TECH_HINTS.items():
+                if keyword in domain_lower and tech not in all_techs:
+                    logger.debug(
+                        f"[nuclei] Domain-inferred tech: {a.domain} → {tech} "
+                        f"(httpx only detected: {a.technologies})"
+                    )
+                    all_techs.append(tech)
 
         # Use the highest interest level in the batch to govern tag selection
         level_order = ["noise", "low", "medium", "high", "critical"]

@@ -186,7 +186,6 @@ async def upsert_endpoint(endpoint: CrawledEndpoint) -> bool:
                 "$setOnInsert": {
                     **endpoint.model_dump(exclude={"last_seen", "crawl_run_id"}),
                     "first_seen": now,
-                    "last_seen":  now,
                     "is_new":     True,
                 },
             },
@@ -268,7 +267,6 @@ async def upsert_secret(secret: CrawlSecret) -> bool:
                 "$setOnInsert": {
                     **secret.model_dump(exclude={"last_seen", "crawl_run_id"}),
                     "first_seen": now,
-                    "last_seen":  now,
                     "is_new":     True,
                 },
             },
