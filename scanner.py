@@ -218,10 +218,14 @@ async def scan_program(
             await asyncio.gather(*stamp_tasks, return_exceptions=True)
 
     # Launch all batch coroutines — semaphore ensures only `parallel` run at once
-    await asyncio.gather(
+    batch_results = await asyncio.gather(
         *[_run_batch(idx, batch) for idx, batch in enumerate(batches, start=1)],
         return_exceptions=True,
     )
+    for i, result in enumerate(batch_results):
+        if isinstance(result, Exception):
+            logger.error(f"[scanner] Batch {i+1} raised exception: {type(result).__name__}: {result}")
+            run.errors.append(str(result))
 
     # ── 6. Flip is_new=False on all alerted findings ──────────────────────
     if new_finding_ids:

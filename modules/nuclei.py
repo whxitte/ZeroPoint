@@ -50,6 +50,31 @@ from loguru import logger
 
 from models import Finding, InterestLevel, ScanSeverity
 
+# Domain keyword → technology hint
+# Used when httpx can't fingerprint through a reverse proxy (e.g. Nginx in front of Kibana)
+_DOMAIN_TECH_HINTS: dict[str, str] = {
+    "kibana":        "kibana",
+    "grafana":       "grafana",
+    "elastic":       "elasticsearch",
+    "elasticsearch": "elasticsearch",
+    "jenkins":       "jenkins",
+    "gitlab":        "gitlab",
+    "jira":          "jira",
+    "sonar":         "sonarqube",
+    "code-review":   "sonarqube",
+    "codereview":    "sonarqube",
+    "pgadmin":       "pgadmin",
+    "phpmyadmin":    "phpmyadmin",
+    "airflow":       "airflow",
+    "jupyter":       "jupyter",
+    "vault":         "vault",
+    "consul":        "consul",
+    "prometheus":    "prometheus",
+    "minio":         "minio",
+    "rabbitmq":      "rabbitmq",
+    "wordpress":     "wordpress",
+    "wp-":           "wordpress",
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tech Stack → Nuclei Template Tag Mapping
@@ -555,19 +580,22 @@ class NucleiScanner:
         scan_run_id: str,
     ) -> AsyncIterator[Finding]:
         """Batch scan — union of all tech tags across the batch."""
-        all_techs = []
+        all_techs: list[str] = []
+
         for a in assets:
+            # Use tech stack detected by httpx
             all_techs.extend(a.technologies)
-            # Infer technology from domain name when httpx couldn't fingerprint
-            # through a reverse proxy (e.g. kibana.example.com behind Nginx)
+
+            # Infer tech from domain name when httpx only sees the reverse proxy
+            # e.g. kibana.example.com behind Nginx — httpx detects "Nginx", not "Kibana"
             domain_lower = a.domain.lower()
-            for keyword, tech in _DOMAIN_TECH_HINTS.items():
-                if keyword in domain_lower and tech not in all_techs:
-                    logger.debug(
-                        f"[nuclei] Domain-inferred tech: {a.domain} → {tech} "
-                        f"(httpx only detected: {a.technologies})"
+            for keyword, inferred_tech in _DOMAIN_TECH_HINTS.items():
+                if keyword in domain_lower and inferred_tech not in all_techs:
+                    logger.info(
+                        f"[nuclei] Domain-inferred tech: {a.domain} → {inferred_tech} "
+                        f"(httpx detected: {a.technologies or ['nothing']})"
                     )
-                    all_techs.append(tech)
+                    all_techs.append(inferred_tech)
 
         # Use the highest interest level in the batch to govern tag selection
         level_order = ["noise", "low", "medium", "high", "critical"]
