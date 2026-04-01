@@ -76,6 +76,7 @@ MODULE_LABELS = {
     "github":   "Module 6 \u2014 GitHub OSINT",
     "portscan": "Module 7 \u2014 Port Scanner",
     "dork":     "Module 8 \u2014 Google Dork Engine",
+    "asn":      "Module 9 \u2014 ASN Mapper",
 }
 
 # Default schedule intervals in seconds
@@ -379,10 +380,15 @@ async def run_dork(program_id: str, force: bool = False) -> ModuleResult:
         from google_dork import dork_program, _build_dorker
         from db.dork_ops import ensure_dork_indexes
 
-        if not settings.GOOGLE_API_KEY or not settings.GOOGLE_CSE_ID:
+        has_dork_key = (
+            settings.BRAVE_SEARCH_API_KEY
+            or settings.SERPAPI_KEY
+            or (settings.GOOGLE_API_KEY and settings.GOOGLE_CSE_ID)
+        )
+        if not has_dork_key:
             logger.warning(
-                "[orchestrator] GOOGLE_API_KEY or GOOGLE_CSE_ID not set — skipping dork. "
-                "Add both to .env to enable Module 8."
+                "[orchestrator] No dork API key configured — skipping Module 8. "
+                "Set BRAVE_SEARCH_API_KEY, SERPAPI_KEY, or GOOGLE_API_KEY+GOOGLE_CSE_ID."
             )
             result.stats      = {"skipped": True, "reason": "Google API credentials not configured"}
             result.finished_at = datetime.now(timezone.utc)
