@@ -300,7 +300,7 @@ class PermutationWorker:
         self,
         massdns_binary: str  = "massdns",
         resolvers_path: str  = RESOLVERS_DEFAULT,
-        massdns_rate:   int  = 5000,
+        massdns_rate:   int  = 2000,
         wordlist:       str  = "",
         max_candidates: int  = 500_000,
     ) -> None:

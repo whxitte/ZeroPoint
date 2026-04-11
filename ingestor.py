@@ -175,28 +175,53 @@ async def _run_permutation(
 
     worker = PermutationWorker(
         massdns_binary = getattr(settings, "MASSDNS_PATH", "massdns"),
-        massdns_rate   = getattr(settings, "PERMUTATION_RATE", 5000),
+        massdns_rate   = getattr(settings, "PERMUTATION_RATE", 2000),
         wordlist       = getattr(settings, "PERMUTATION_WORDLIST", ""),
         max_candidates = getattr(settings, "PERMUTATION_MAX_CANDIDATES", 500_000),
     )
 
-    perm_results: List[UpsertResult] = []
+    # Collect all resolved domains first (massdns finishes inside permute())
+    resolved_domains: List[str] = []
     async for new_domain in worker.permute(seeds, root_domain):
-        try:
-            result = await db.upsert_asset(
-                domain     = new_domain,
-                program_id = program_id,
-                source     = ReconSource.UNKNOWN,  # source=permutation label
-            )
-            # Tag with permutation source
-            from db.mongo import get_assets_col as _col
-            await _col().update_one(
-                {"domain": new_domain},
-                {"$addToSet": {"sources": "permutation"}},
-            )
-            perm_results.append(result)
-        except Exception as exc:
-            logger.warning(f"[permutation] DB upsert failed for {new_domain}: {exc}")
+        resolved_domains.append(new_domain)
+
+    # massdns hammers the system DNS resolver at high qps.
+    # MongoDB Atlas hostnames need DNS to resolve — wait for the resolver to
+    # recover before firing upserts. 20s > serverSelectionTimeoutMS (10s) so
+    # the first attempt succeeds cleanly instead of burning its full timeout.
+    if resolved_domains:
+        logger.debug("[permutation] Waiting 20s for DNS resolver to recover after massdns...")
+        await asyncio.sleep(20)
+
+    perm_results: List[UpsertResult] = []
+    from db.mongo import get_assets_col as _col
+    for new_domain in resolved_domains:
+        # Retry up to 3 times with exponential backoff on transient DNS/network errors
+        for attempt in range(1, 4):
+            try:
+                result = await db.upsert_asset(
+                    domain     = new_domain,
+                    program_id = program_id,
+                    source     = ReconSource.UNKNOWN,
+                )
+                await _col().update_one(
+                    {"domain": new_domain},
+                    {"$addToSet": {"sources": "permutation"}},
+                )
+                perm_results.append(result)
+                break  # success
+            except Exception as exc:
+                if attempt < 3:
+                    wait = 2 ** attempt
+                    logger.warning(
+                        f"[permutation] DB upsert attempt {attempt}/3 failed for "
+                        f"{new_domain} — retrying in {wait}s: {exc}"
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(
+                        f"[permutation] DB upsert permanently failed for {new_domain}: {exc}"
+                    )
 
     new_perm = sum(1 for r in perm_results if r.is_new)
     summary.permutation_new  += new_perm
