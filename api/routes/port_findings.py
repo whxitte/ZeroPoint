@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 
 from api.auth import get_current_tenant
+from api.deps import verify_program_ownership   # ← FIX: was missing
 from db.mongo import get_db
 
 router = APIRouter(prefix="/portfindings", tags=["port-scanner"])
@@ -13,13 +14,13 @@ router = APIRouter(prefix="/portfindings", tags=["port-scanner"])
 
 @router.get("/", summary="List port scanner findings for a program")
 async def list_port_findings(
-    program_id: str,
     severity:   Optional[str]  = None,
     is_new:     Optional[bool] = None,
     port:       Optional[int]  = None,
     service:    Optional[str]  = None,
     limit:      int = Query(default=100, le=1000),
     skip:       int = 0,
+    program_id: str = Depends(verify_program_ownership),   # ← FIX: was plain str param
     tenant_id:  str = Depends(get_current_tenant),
 ):
     col   = get_db()["port_findings"]
@@ -45,7 +46,7 @@ async def list_port_findings(
 
 @router.get("/stats", summary="Port scanner statistics for a program")
 async def port_stats(
-    program_id: str,
+    program_id: str = Depends(verify_program_ownership),   # ← FIX
     tenant_id:  str = Depends(get_current_tenant),
 ):
     col      = get_db()["port_findings"]
@@ -57,7 +58,6 @@ async def port_stats(
     async for doc in col.aggregate(pipeline):
         by_sev[doc["_id"] or "unknown"] = doc["count"]
 
-    # Top exposed services
     svc_pipeline = [
         {"$match": {"program_id": program_id, "tenant_id": tenant_id}},
         {"$group": {"_id": "$service", "count": {"$sum": 1}}},
@@ -79,10 +79,9 @@ async def port_stats(
 
 @router.get("/critical", summary="CRITICAL exposed services (unauthenticated databases, Docker)")
 async def critical_findings(
-    program_id: str,
+    program_id: str = Depends(verify_program_ownership),   # ← FIX
     tenant_id:  str = Depends(get_current_tenant),
 ):
-    """Returns all CRITICAL findings — unauthenticated Redis, MongoDB, Elasticsearch, Docker API etc."""
     col      = get_db()["port_findings"]
     query    = {"program_id": program_id, "tenant_id": tenant_id, "severity": "critical"}
     findings = []

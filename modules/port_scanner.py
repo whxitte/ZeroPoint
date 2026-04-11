@@ -286,14 +286,17 @@ async def _run_masscan(
             f"[masscan] Binary not found at '{binary}'. "
             "Install: sudo apt install masscan  OR  see https://github.com/robertdavidgraham/masscan"
         )
+        return {}, False
     except asyncio.TimeoutError:
         logger.warning("[masscan] Timed out — killing process")
         try:
             proc.kill()
         except Exception:
             pass
+        return {}, False
     except Exception as exc:
         logger.exception(f"[masscan] Unexpected error: {exc}")
+        return {}, False
     finally:
         for path in (input_path, output_path):
             try:

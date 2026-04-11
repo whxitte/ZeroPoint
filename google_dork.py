@@ -3,52 +3,25 @@ ZeroPoint :: google_dork.py
 ============================
 Module 8 Orchestrator — Google Dork Engine.
 
-Finds publicly indexed sensitive exposures that no port scanner or crawler
-can reach — because they exist only in Google's index:
-
-  Exposed .env files    → site:target.com filetype:env
-  SQL dumps             → site:target.com filetype:sql
-  Backup files          → site:target.com ext:bak
-  Hardcoded credentials → site:target.com "DB_PASSWORD"
-  Private keys          → site:target.com "BEGIN RSA PRIVATE KEY"
-  AWS keys              → site:target.com "AWS_ACCESS_KEY_ID"
-  Admin panels          → site:target.com inurl:admin
-  Open directory listings → site:target.com intitle:"Index of /"
-  Swagger/API docs      → site:target.com inurl:swagger
-  Stack traces          → site:target.com "Stack Trace"
-  phpMyAdmin            → site:target.com inurl:phpmyadmin
-  Jenkins               → site:target.com inurl:jenkins
-
-Pipeline per program:
-  1. Load program root domains from DB
-  2. For each domain: run all 35+ dork queries via Google CSE API
-  3. Each result is deduped via SHA-256 (domain + category + url)
-  4. Upsert to `dork_results` collection
-  5. Alert immediately on CRITICAL/HIGH findings
-  6. Save DorkScanRun audit record
-
-Setup (5 minutes, free tier = 100 queries/day):
-  1. https://console.cloud.google.com → enable "Custom Search API" → create API key
-  2. https://cse.google.com/cse/ → create engine with "Search the entire web"
-  3. Add to .env:
-       GOOGLE_API_KEY=AIzaSy...
-       GOOGLE_CSE_ID=abc123...
-
-Usage:
-    python3 google_dork.py --program-id shopify_h1
-    python3 google_dork.py                           # all active programs
-    python3 google_dork.py --domain shopify.com      # quick single-domain test
+Changes vs previous version:
+  - FIX: run.queries_run += 1 → run.queries_run += 1  (Qwen bug #3)
+  - NEW: dork→asset pipeline integration — when a dork result exposes a new
+         subdomain of the target domain, upsert it into the assets collection
+         so Module 2/3/4 can pick it up on the next cycle. This is how
+         quipo-dev-test.quipohealth.com would have been auto-added.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from typing import List, Optional
+from urllib.parse import urlparse
 
 from loguru import logger
 
@@ -61,7 +34,7 @@ from db.dork_ops import (
     save_dork_run,
     upsert_dork_result,
 )
-from models import DorkScanRun, DorkSeverity
+from models import DorkScanRun, DorkSeverity, ReconSource
 from modules.dorker import build_dorker
 
 
@@ -99,12 +72,81 @@ _ALERT_SEVERITIES = {DorkSeverity.CRITICAL, DorkSeverity.HIGH}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Dork → Asset pipeline integration
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_subdomain(url: str, root_domain: str) -> Optional[str]:
+    """
+    Extract subdomain from a dork result URL if it belongs to root_domain.
+
+    Examples:
+      "https://quipo-dev-test.quipohealth.com/" + "quipohealth.com"
+        → "quipo-dev-test.quipohealth.com"
+      "https://quipohealth.com/login" + "quipohealth.com"
+        → None  (apex domain, not a subdomain)
+      "https://evil.com/" + "quipohealth.com"
+        → None  (out of scope)
+    """
+    try:
+        host = urlparse(url.lower()).netloc.split(":")[0].strip()
+        if not host:
+            return None
+        # Must be a proper subdomain (not the apex itself)
+        if host == root_domain:
+            return None
+        if host.endswith(f".{root_domain}"):
+            return host
+        return None
+    except Exception:
+        return None
+
+
+async def _inject_dork_subdomains_into_assets(
+    dork_url:   str,
+    root_domain: str,
+    program_id:  str,
+) -> bool:
+    """
+    If the dork result URL contains a new subdomain of root_domain,
+    upsert it into the assets collection so the pipeline can process it.
+
+    Returns True if a new asset was injected.
+    """
+    subdomain = _extract_subdomain(dork_url, root_domain)
+    if not subdomain:
+        return False
+
+    try:
+        result = await mongo_ops.upsert_asset(
+            domain       = subdomain,
+            program_id   = program_id,
+            source       = ReconSource.UNKNOWN,   # special source tag
+            ip_addresses = [],
+        )
+        # Override source label for clarity in DB
+        col = mongo_ops.get_assets_col()
+        await col.update_one(
+            {"domain": subdomain},
+            {"$addToSet": {"sources": "dork"}},
+        )
+        if result.is_new:
+            logger.success(
+                f"[dork→asset] NEW subdomain injected into assets: "
+                f"{subdomain} (from dork result {dork_url[:60]})"
+            )
+        return result.is_new
+    except Exception as exc:
+        logger.warning(f"[dork→asset] Failed to inject {subdomain}: {exc}")
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Per-program dork scan
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def dork_program(
     program_id: str,
-    dorker:     GoogleDorker,
+    dorker,
     tenant_id:  str = "default",
 ) -> DorkScanRun:
     """Execute the full dork scan pipeline for one program."""
@@ -131,6 +173,7 @@ async def dork_program(
     new_result_ids: List[str] = []
     sev_counter:    Counter   = Counter()
     alert_tasks:    List      = []
+    injected_count: int       = 0
 
     for domain in program.domains:
         logger.info(f"[dork] Scanning domain: {domain}")
@@ -141,8 +184,8 @@ async def dork_program(
             run_id     = run.run_id,
             tenant_id  = tenant_id,
         ):
-            run.results_raw += 1
-            run.queries_run   = 1  # approximation — incremented per yield batch
+            run.results_raw  += 1
+            run.queries_run  += 1   # FIX: was `= 1` (never incremented past 1)
 
             try:
                 is_new = await upsert_dork_result(result)
@@ -159,6 +202,13 @@ async def dork_program(
 
                 if result.severity in _ALERT_SEVERITIES:
                     alert_tasks.append(notify_dork_finding(result, program_id))
+
+                # NEW: inject newly discovered subdomains into assets pipeline
+                injected = await _inject_dork_subdomains_into_assets(
+                    result.url, domain, program_id
+                )
+                if injected:
+                    injected_count += 1
 
     # Fire all queued alerts
     if alert_tasks:
@@ -186,7 +236,8 @@ async def dork_program(
     elapsed = (run.finished_at - run.started_at).total_seconds()
     logger.success(
         f"[dork] ✓ {program_id} | "
-        f"raw={run.results_raw} new={run.new_findings} elapsed={elapsed:.1f}s | "
+        f"raw={run.results_raw} new={run.new_findings} "
+        f"injected_assets={injected_count} elapsed={elapsed:.1f}s | "
         f"🚨crit={sev_counter.get('critical', 0)} "
         f"🔴high={sev_counter.get('high', 0)} "
         f"🟡med={sev_counter.get('medium', 0)}"
@@ -198,7 +249,7 @@ async def dork_program(
 # All-programs orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def dork_all_programs(dorker: GoogleDorker) -> List[DorkScanRun]:
+async def dork_all_programs(dorker) -> List[DorkScanRun]:
     programs = await mongo_ops.list_active_programs()
     if not programs:
         logger.warning("[dork] No active programs in DB.")
@@ -227,7 +278,7 @@ async def dork_single_domain(domain: str) -> None:
         logger.error(
             "[dork] No search API key configured. Add one of:\n"
             "  BRAVE_SEARCH_API_KEY=BSA...  (recommended)\n"
-            "    Get key: https://api.search.brave.com/app/dashboard\n"
+            "  OR  SERPAPI_KEY=...          (100 free/month, no card)\n"
             "  OR  GOOGLE_API_KEY=AIza... + GOOGLE_CSE_ID=abc..."
         )
         return
@@ -240,7 +291,9 @@ async def dork_single_domain(domain: str) -> None:
     async for result in dorker.dork(domain, "__test__", "test_run"):
         count += 1
         sev = result.severity.value
-        print(f"  [{sev.upper():8}]  [{result.dork_category}]")
+        sub = _extract_subdomain(result.url, domain)
+        sub_tag = f"  ⚡ New subdomain: {sub}" if sub else ""
+        print(f"  [{sev.upper():8}]  [{result.dork_category}]{sub_tag}")
         print(f"             URL:    {result.url[:100]}")
         if result.title:
             print(f"             Title:  {result.title[:80]}")

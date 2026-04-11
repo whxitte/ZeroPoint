@@ -239,6 +239,29 @@ class Settings(BaseSettings):
         description="Seconds between GitHub OSINT runs in daemon mode (default: 6h)",
     )
 
+
+    # ── Permutation (Module 1b) ──────────────────────────────────────────────
+    PERMUTATION_ENABLED:          bool  = Field(
+        default=False,
+        description="Auto-run subdomain permutation after passive recon (dnsgen + massdns required)",
+    )
+    MASSDNS_PATH:                 str   = Field(default="massdns")
+    PERMUTATION_RATE:             int   = Field(
+        default=5000,
+        description="massdns DNS queries per second",
+    )
+    PERMUTATION_WORDLIST:         str   = Field(
+        default="",
+        description="Optional path to custom wordlist for dnsgen mutations",
+    )
+    PERMUTATION_MAX_CANDIDATES:   int   = Field(
+        default=500000,
+        description="Safety cap on dnsgen candidate count",
+    )
+    PERMUTATION_RESOLVERS_PATH:   str   = Field(
+        default="~/.config/zeropoint/resolvers.txt",
+        description="Path to DNS resolver list (auto-downloaded if missing or stale)",
+    )
     # ── Concurrency & Rate-Limiting ──────────────────────────────────────────
     MAX_CONCURRENT_PROGRAMS:   int   = Field(default=3)
     MAX_CONCURRENT_TOOLS:      int   = Field(default=3)

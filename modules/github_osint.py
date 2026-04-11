@@ -204,13 +204,21 @@ class GitHubOSINTScanner:
                     return data.get("items", [])
 
                 if resp.status == 403:
-                    # Rate limited or token invalid
-                    reset_ts = resp.headers.get("X-RateLimit-Reset")
+                    # GitHub secondary rate limit — wait until the reset window
+                    import time
+                    reset_ts  = resp.headers.get("X-RateLimit-Reset")
+                    remaining = resp.headers.get("X-RateLimit-Remaining", "?")
+                    now       = int(time.time())
+                    if reset_ts and reset_ts.isdigit():
+                        wait = max(0, int(reset_ts) - now) + 2  # +2s buffer
+                    else:
+                        wait = 30  # fallback: wait 30s
                     logger.warning(
                         f"[github] 403 on query '{query[:60]}' — "
-                        f"rate limited or bad token. Reset: {reset_ts}"
+                        f"secondary rate limit hit. remaining={remaining} "
+                        f"Sleeping {wait}s until reset..."
                     )
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(wait)
                     return []
 
                 if resp.status == 422:

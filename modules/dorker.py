@@ -418,9 +418,13 @@ class BraveDorker:
                     return data.get("web", {}).get("results", [])
 
                 if resp.status == 429:
+                    try:
+                        err_body = await resp.json()
+                        err_msg  = str(err_body)
+                    except Exception:
+                        err_msg  = await resp.text()
                     logger.warning(
-                        "[dork] Brave API rate limit (429) — "
-                        "monthly quota (2,000 free queries) exhausted. Stopping."
+                        f"[dork] Brave API rate limit (429). Detail: {err_msg[:100]}"
                     )
                     self._exhausted = True
                     return []
@@ -549,8 +553,11 @@ class GoogleDorker:
                     return []
 
                 if resp.status == 403:
-                    body = await resp.json()
-                    err  = body.get("error", {}).get("message", "unknown")
+                    try:
+                        body = await resp.json()
+                        err  = body.get("error", {}).get("message", "unknown")
+                    except Exception:
+                        err  = (await resp.text())[:200]
 
                     if "does not have the access" in err or "not enabled" in err.lower():
                         logger.error(
@@ -680,8 +687,11 @@ class SerpApiDorker:
                     return data.get("organic_results", [])
 
                 if resp.status == 429 or resp.status == 401:
-                    body = await resp.json()
-                    err  = body.get("error", "unknown")
+                    try:
+                        body = await resp.json()
+                        err  = body.get("error", "unknown")
+                    except Exception:
+                        err  = (await resp.text())[:200]
                     if "credit" in err.lower() or "out of searches" in err.lower():
                         logger.warning(
                             f"[dork] SerpAPI monthly limit reached: {err}\n"

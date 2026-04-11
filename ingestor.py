@@ -3,28 +3,26 @@ ZeroPoint :: ingestor.py
 =========================
 Module 1 — The Ingestion Engine Orchestrator.
 
+Changes vs previous version:
+  - NEW: Optional Module 1b — Subdomain Permutation via dnsgen + massdns
+         Enabled by PERMUTATION_ENABLED=true in .env
+         Runs *after* passive recon so dnsgen has the full seed list to work from
+
 This is the entry point for a full subdomain discovery + ingestion run.
 It coordinates:
   1. Loading active programs from MongoDB
   2. Running all recon tools in parallel (Subfinder, crt.sh, Shodan)
-  3. Deduplicating and upserting results into MongoDB with state tracking
-  4. Dispatching new-asset notifications (Discord / Telegram)
-  5. Emitting a structured run summary
+  3. [Optional] Running permutation on the collected seeds (dnsgen + massdns)
+  4. Deduplicating and upserting results into MongoDB with state tracking
+  5. Dispatching new-asset notifications (Discord / Telegram)
+  6. Emitting a structured run summary
 
 Usage:
-    # Run against all active programs in DB:
-    python ingestor.py
-
-    # Run against a specific program:
+    python ingestor.py                              # all active programs
     python ingestor.py --program-id hackerone_google
-
-    # Seed the DB with a program first time:
     python ingestor.py --seed-program example.com --program-id my_program
-
-Architecture:
-    Programs are processed with a concurrency semaphore (MAX_CONCURRENT_PROGRAMS)
-    to avoid hammering all tools against 50 targets simultaneously, which would
-    trigger WAF bans and IP blocks — we're optimising for stealth AND speed.
+    python ingestor.py --permute                    # force permutation even if disabled in .env
+    python ingestor.py --no-permute                 # skip permutation even if enabled in .env
 """
 
 from __future__ import annotations
@@ -47,14 +45,11 @@ from modules.recon import discover_subdomains
 
 
 # ---------------------------------------------------------------------------
-# Logging setup — structured, rotated, pretty
+# Logging setup
 # ---------------------------------------------------------------------------
 
 def configure_logging() -> None:
-    """Set up Loguru with console + rotating file sinks."""
-    logger.remove()  # Remove default handler
-
-    # Console — colour-coded, human readable
+    logger.remove()
     logger.add(
         sys.stderr,
         level=settings.LOG_LEVEL,
@@ -68,8 +63,6 @@ def configure_logging() -> None:
         backtrace=True,
         diagnose=True,
     )
-
-    # File — JSON-structured for later analysis / grep
     logger.add(
         settings.LOG_FILE,
         level="DEBUG",
@@ -78,14 +71,13 @@ def configure_logging() -> None:
         retention=settings.LOG_RETENTION,
         compression="gz",
         serialize=False,
-        enqueue=True,        # Thread-safe async logging
+        enqueue=True,
     )
-
     logger.info("ZeroPoint Ingestion Engine — logging initialised.")
 
 
 # ---------------------------------------------------------------------------
-# Run Summary — emitted after every execution
+# Run Summaries
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -96,22 +88,22 @@ class ProgramRunSummary:
     finished_at:      Optional[datetime] = None
     total_discovered: int = 0
     net_new_count:    int = 0
+    permutation_new:  int = 0   # NEW: subdomains found via permutation
     source_breakdown: Dict[str, int] = field(default_factory=dict)
     errors:           List[str] = field(default_factory=list)
     elapsed_seconds:  float = 0.0
 
     def finalise(self) -> None:
         self.finished_at = datetime.now(timezone.utc)
-        self.elapsed_seconds = (
-            self.finished_at - self.started_at
-        ).total_seconds()
+        self.elapsed_seconds = (self.finished_at - self.started_at).total_seconds()
 
     def log(self) -> None:
         status = "✅" if not self.errors else "⚠️"
+        perm_note = f" | permutation_new={self.permutation_new}" if self.permutation_new else ""
         logger.info(
             f"{status} [{self.program_id}] Run complete | "
             f"discovered={self.total_discovered} | "
-            f"net_new={self.net_new_count} | "
+            f"net_new={self.net_new_count}{perm_note} | "
             f"elapsed={self.elapsed_seconds:.1f}s | "
             f"breakdown={self.source_breakdown}"
         )
@@ -143,22 +135,99 @@ class EngineRunSummary:
 
 
 # ---------------------------------------------------------------------------
+# Permutation helper
+# ---------------------------------------------------------------------------
+
+async def _run_permutation(
+    program_id:  str,
+    root_domain: str,
+    summary:     ProgramRunSummary,
+) -> List[UpsertResult]:
+    """
+    Run Module 1b — permutation — using existing assets as seeds.
+    Returns list of UpsertResult for new assets found by permutation.
+    """
+    from modules.permutation import PermutationWorker
+
+    # Fetch existing subdomains from DB as seeds
+    existing = await db.get_new_assets_since.__wrapped__ if hasattr(
+        db.get_new_assets_since, '__wrapped__'
+    ) else None
+
+    # Use the assets collection directly for a broader seed list
+    from db.mongo import get_assets_col
+    col = get_assets_col()
+    seeds: List[str] = []
+    async for doc in col.find(
+        {"program_id": program_id},
+        {"domain": 1, "_id": 0}
+    ).limit(5000):
+        seeds.append(doc["domain"])
+
+    if len(seeds) < 3:
+        logger.info(f"[permutation] Too few seeds ({len(seeds)}) — skipping. Run ingest first.")
+        return []
+
+    logger.info(
+        f"[permutation] Starting permutation | "
+        f"seeds={len(seeds)} | root={root_domain}"
+    )
+
+    worker = PermutationWorker(
+        massdns_binary = getattr(settings, "MASSDNS_PATH", "massdns"),
+        massdns_rate   = getattr(settings, "PERMUTATION_RATE", 5000),
+        wordlist       = getattr(settings, "PERMUTATION_WORDLIST", ""),
+        max_candidates = getattr(settings, "PERMUTATION_MAX_CANDIDATES", 500_000),
+    )
+
+    perm_results: List[UpsertResult] = []
+    async for new_domain in worker.permute(seeds, root_domain):
+        try:
+            result = await db.upsert_asset(
+                domain     = new_domain,
+                program_id = program_id,
+                source     = ReconSource.UNKNOWN,  # source=permutation label
+            )
+            # Tag with permutation source
+            from db.mongo import get_assets_col as _col
+            await _col().update_one(
+                {"domain": new_domain},
+                {"$addToSet": {"sources": "permutation"}},
+            )
+            perm_results.append(result)
+        except Exception as exc:
+            logger.warning(f"[permutation] DB upsert failed for {new_domain}: {exc}")
+
+    new_perm = sum(1 for r in perm_results if r.is_new)
+    summary.permutation_new  += new_perm
+    summary.total_discovered += len(perm_results)
+    summary.source_breakdown["permutation"] = len(perm_results)
+
+    logger.success(
+        f"[permutation] ✓ {root_domain} | "
+        f"found={len(perm_results)} new={new_perm}"
+    )
+    return perm_results
+
+
+# ---------------------------------------------------------------------------
 # Per-program ingestion logic
 # ---------------------------------------------------------------------------
 
 async def ingest_program(
-    program: Program,
-    semaphore: asyncio.Semaphore,
+    program:    Program,
+    semaphore:  asyncio.Semaphore,
+    run_permutation: bool = False,
 ) -> ProgramRunSummary:
     """
     Full ingestion run for a single program.
 
     Steps:
-      1. Acquire semaphore slot (limits concurrent programs)
+      1. Acquire semaphore slot
       2. For each root domain: run all recon tools in parallel
-      3. Merge results across domains
+      3. [Optional] Run permutation on collected seeds
       4. Bulk-upsert into MongoDB
-      5. Return summary (does NOT trigger notifications — caller handles that)
+      5. Return summary
     """
     summary = ProgramRunSummary(
         program_id=program.program_id,
@@ -175,13 +244,12 @@ async def ingest_program(
 
         all_upsert_results: List[UpsertResult] = []
 
-        # Run discovery for each root domain in the program scope
+        # Passive recon for each root domain
         for root_domain in program.domains:
             try:
                 recon_results: List[ReconResult] = await discover_subdomains(root_domain)
 
                 for recon_result in recon_results:
-                    # Collect errors into summary
                     summary.errors.extend(recon_result.errors)
 
                     if not recon_result.domains:
@@ -194,11 +262,10 @@ async def ingest_program(
                     )
                     summary.total_discovered += len(recon_result.domains)
 
-                    # Upsert all discovered domains into MongoDB
                     upsert_results = await db.bulk_upsert_assets(
-                        domains=recon_result.domains,
-                        program_id=program.program_id,
-                        source=source,
+                        domains    = recon_result.domains,
+                        program_id = program.program_id,
+                        source     = source,
                     )
                     all_upsert_results.extend(upsert_results)
 
@@ -207,12 +274,23 @@ async def ingest_program(
                 logger.error(msg)
                 summary.errors.append(msg)
 
-        # Tally net-new assets
+        # Optional permutation phase
+        if run_permutation:
+            for root_domain in program.domains:
+                try:
+                    perm_results = await _run_permutation(
+                        program.program_id, root_domain, summary
+                    )
+                    all_upsert_results.extend(perm_results)
+                except Exception as exc:
+                    msg = f"Permutation error for {root_domain}: {repr(exc)}"
+                    logger.error(msg)
+                    summary.errors.append(msg)
+
         summary.net_new_count = sum(1 for r in all_upsert_results if r.is_new)
         summary.finalise()
         summary.log()
 
-        # Dispatch notifications for new assets discovered in this program
         if all_upsert_results:
             await notify_new_assets(all_upsert_results)
 
@@ -225,32 +303,21 @@ async def ingest_program(
 
 async def run_engine(
     program_id_filter: Optional[str] = None,
+    run_permutation:   bool          = False,
 ) -> EngineRunSummary:
-    """
-    Main async entry point for the Ingestion Engine.
-
-    1. Ensures DB indexes exist
-    2. Loads active programs
-    3. Runs all programs concurrently (bounded by semaphore)
-    4. Returns engine-level summary
-    """
     engine_summary = EngineRunSummary()
 
-    # Ensure MongoDB indexes on every run (idempotent)
     await db.ensure_indexes()
 
-    # Load programs
     programs = await db.list_active_programs()
 
     if not programs:
         logger.warning(
             "No active programs found in database. "
-            "Seed one with: python ingestor.py --seed-program <domain> "
-            "--program-id <id>"
+            "Seed one with: python ingestor.py --seed-program <domain> --program-id <id>"
         )
         return engine_summary
 
-    # Apply optional filter
     if program_id_filter:
         programs = [p for p in programs if p.program_id == program_id_filter]
         if not programs:
@@ -260,16 +327,36 @@ async def run_engine(
     engine_summary.program_count = len(programs)
     logger.info(f"[Engine] Processing {len(programs)} active program(s).")
 
-    # Semaphore controls max concurrent program scans
-    semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_PROGRAMS)
+    # Check permutation availability early
+    if run_permutation:
+        import shutil
+        massdns_bin = getattr(settings, "MASSDNS_PATH", "massdns")
+        if not shutil.which(massdns_bin):
+            logger.error(
+                f"[permutation] massdns not found at '{massdns_bin}'.\n"
+                "  Install: go install github.com/blechschmidt/massdns/cmd/massdns@latest\n"
+                "  Disabling permutation for this run."
+            )
+            run_permutation = False
+        try:
+            import dnsgen  # noqa: F401
+        except ImportError:
+            logger.error(
+                "[permutation] dnsgen not installed.\n"
+                "  Install: pip install dnsgen\n"
+                "  Disabling permutation for this run."
+            )
+            run_permutation = False
 
-    # Launch all program ingestion tasks concurrently
-    tasks = [ingest_program(p, semaphore) for p in programs]
+    semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_PROGRAMS)
+    tasks     = [
+        ingest_program(p, semaphore, run_permutation=run_permutation)
+        for p in programs
+    ]
     program_summaries: List[ProgramRunSummary] = await asyncio.gather(
         *tasks, return_exceptions=False
     )
 
-    # Aggregate engine-level totals
     for ps in program_summaries:
         engine_summary.total_found += ps.total_discovered
         engine_summary.total_new   += ps.net_new_count
@@ -286,11 +373,10 @@ async def run_engine(
 
 async def seed_program(
     program_id: str,
-    domain: str,
-    platform: str = "private",
-    name: Optional[str] = None,
+    domain:     str,
+    platform:   str           = "private",
+    name:       Optional[str] = None,
 ) -> None:
-    """Seed a new program into MongoDB for first-time setup."""
     await db.ensure_indexes()
 
     try:
@@ -322,46 +408,40 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run against all active programs:
+  # Run passive recon only:
   python ingestor.py
 
-  # Run against a single program:
-  python ingestor.py --program-id hackerone_acme
+  # Run passive recon + permutation:
+  python ingestor.py --permute
 
-  # Seed a new program and run it immediately:
+  # Single program with permutation:
+  python ingestor.py --program-id quipo --permute
+
+  # Seed and run immediately:
   python ingestor.py --seed-program example.com --program-id acme_corp --run-after-seed
         """,
     )
-    parser.add_argument(
-        "--program-id",
-        type=str,
-        default=None,
-        help="Only process this specific program ID",
-    )
-    parser.add_argument(
-        "--seed-program",
-        type=str,
-        default=None,
-        metavar="DOMAIN",
-        help="Seed a new program with this root domain",
-    )
-    parser.add_argument(
-        "--program-name",
-        type=str,
-        default=None,
-        help="Human-readable name for the seeded program",
-    )
+    parser.add_argument("--program-id",    type=str, default=None)
+    parser.add_argument("--seed-program",  type=str, default=None, metavar="DOMAIN")
+    parser.add_argument("--program-name",  type=str, default=None)
     parser.add_argument(
         "--platform",
         type=str,
         default="private",
         choices=[p.value for p in ProgramPlatform],
-        help="Bug bounty platform for the seeded program",
+    )
+    parser.add_argument("--run-after-seed", action="store_true")
+    parser.add_argument(
+        "--permute",
+        action="store_true",
+        default=False,
+        help="Run subdomain permutation (dnsgen + massdns) after passive recon",
     )
     parser.add_argument(
-        "--run-after-seed",
+        "--no-permute",
         action="store_true",
-        help="Immediately run ingestion after seeding",
+        default=False,
+        help="Skip permutation even if PERMUTATION_ENABLED=true in .env",
     )
     return parser.parse_args()
 
@@ -370,8 +450,11 @@ async def main() -> None:
     configure_logging()
     args = parse_args()
 
+    # Determine if permutation should run
+    env_permute = getattr(settings, "PERMUTATION_ENABLED", False)
+    run_perm    = (args.permute or env_permute) and not args.no_permute
+
     try:
-        # Seed mode
         if args.seed_program:
             prog_id = args.program_id or args.seed_program.replace(".", "_")
             await seed_program(
@@ -383,13 +466,15 @@ async def main() -> None:
             if not args.run_after_seed:
                 logger.info("Seeding complete. Run without --seed-program to start ingestion.")
                 return
-            # Fall through to run engine against the newly seeded program
             args.program_id = prog_id
 
-        # Main ingestion run
-        await run_engine(program_id_filter=args.program_id)
+        await run_engine(
+            program_id_filter=args.program_id,
+            run_permutation=run_perm,
+        )
 
     finally:
+        await logger.complete()   # flush loguru's enqueued file sink before exit
         await db.close_connection()
 
 

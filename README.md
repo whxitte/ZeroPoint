@@ -113,6 +113,8 @@ go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 go install github.com/projectdiscovery/katana/cmd/katana@latest
 go install github.com/tomnomnom/waybackurls@latest
 go install github.com/lc/gau/v2/cmd/gau@latest
+go install github.com/blechschmidt/massdns/cmd/massdns@latest
+sudo setcap cap_net_raw+ep $(which massdns)
 nuclei -update-templates
 ```
 
@@ -133,6 +135,7 @@ cd ZeroPoint
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+pip install dnsgen
 
 # Optional but recommended: SecretFinder for deeper JS analysis
 git clone https://github.com/m4ll0k/SecretFinder.git /opt/SecretFinder

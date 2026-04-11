@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import os
 """
 ZeroPoint :: modules/recon.py
 ==============================
@@ -12,7 +15,6 @@ Engineering contract:
     true non-blocking execution.
 """
 
-from __future__ import annotations
 
 import asyncio
 import json
@@ -301,13 +303,14 @@ async def run_shodan(root_domain: str) -> ReconResult:
         api = shodan.Shodan(settings.SHODAN_API_KEY)
         return api.dns.domain_info(root_domain, history=False, type="A", page=1)
 
+    # Allow timeout override via SHODAN_TIMEOUT env var (default: 90s)
+    _shodan_timeout = int(os.environ.get("SHODAN_TIMEOUT", "90"))
+
     try:
         loop = asyncio.get_event_loop()
         result = await asyncio.wait_for(
             loop.run_in_executor(None, _blocking_shodan_query),
-            timeout=60,   # Shodan API should respond within 60s — if not, bail out
-                          # Note: the thread still runs to completion internally;
-                          # this just prevents the event loop from waiting forever.
+            timeout=_shodan_timeout,
         )
 
         subdomains: List[str] = result.get("subdomains", [])
@@ -341,7 +344,7 @@ async def run_shodan(root_domain: str) -> ReconResult:
         errors.append(msg)
 
     except asyncio.TimeoutError:
-        msg = f"[Shodan] Timed out after 60s for {root_domain} — skipping"
+        msg = f"[Shodan] Timed out after {_shodan_timeout}s for {root_domain} — skipping"
         logger.warning(msg)
         errors.append(msg)
 

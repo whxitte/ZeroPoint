@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 
 from api.auth import get_current_tenant
+from api.deps import verify_program_ownership   # ← FIX: was missing
 from db.mongo import get_db
 
 router = APIRouter(prefix="/dorks", tags=["google-dork"])
@@ -13,12 +14,12 @@ router = APIRouter(prefix="/dorks", tags=["google-dork"])
 
 @router.get("/", summary="List Google dork findings for a program")
 async def list_dork_results(
-    program_id:    str,
     severity:      Optional[str]  = None,
     dork_category: Optional[str]  = None,
     is_new:        Optional[bool] = None,
     limit:         int = Query(default=100, le=1000),
     skip:          int = 0,
+    program_id:    str = Depends(verify_program_ownership),   # ← FIX: was plain str param
     tenant_id:     str = Depends(get_current_tenant),
 ):
     col   = get_db()["dork_results"]
@@ -42,7 +43,7 @@ async def list_dork_results(
 
 @router.get("/stats", summary="Google dork statistics for a program")
 async def dork_stats(
-    program_id: str,
+    program_id: str = Depends(verify_program_ownership),      # ← FIX
     tenant_id:  str = Depends(get_current_tenant),
 ):
     col      = get_db()["dork_results"]
@@ -54,7 +55,6 @@ async def dork_stats(
     async for doc in col.aggregate(pipeline):
         by_sev[doc["_id"] or "unknown"] = doc["count"]
 
-    # Results by category
     cat_pipeline = [
         {"$match": {"program_id": program_id, "tenant_id": tenant_id}},
         {"$group": {"_id": "$dork_category", "count": {"$sum": 1}}},
@@ -75,10 +75,9 @@ async def dork_stats(
 
 @router.get("/exposed-files", summary="Exposed files found via dorking (.env, .sql, backups)")
 async def exposed_files(
-    program_id: str,
+    program_id: str = Depends(verify_program_ownership),      # ← FIX
     tenant_id:  str = Depends(get_current_tenant),
 ):
-    """Returns all exposed_files and credentials category results — highest signal."""
     col   = get_db()["dork_results"]
     query = {
         "program_id":    program_id,
